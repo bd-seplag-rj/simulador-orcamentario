@@ -116,16 +116,32 @@ def projetar_receitas(cen: Cenario) -> pd.DataFrame:
     return df
 
 
+def fatores_rcl() -> float:
+    """Soma das exclusões aplicadas à receita corrente bruta (art. 2º, IV LRF):
+    deduções constitucionais + contribuições dos servidores + intraorçamentárias."""
+    return (C.FATOR_DEDUCAO_RCL + C.FATOR_CONTRIB_SERVIDORES
+            + C.FATOR_INTRAORCAMENTARIA)
+
+
 def agregar(df_rub: pd.DataFrame) -> pd.DataFrame:
-    """Adiciona linhas agregadas: Receita Corrente (recorrente) e RCL."""
+    """Adiciona linhas agregadas: Receita Corrente (bruta) e RCL (LRF).
+
+    A RCL segue o art. 2º, IV da LRF: exclui as parcelas entregues aos
+    Municípios, as contribuições dos servidores ao RPPS e as receitas
+    intraorçamentárias (duplicação). Ver a composição em config.
+    """
     recorrentes = [r for r, m in C.RUBRICAS.items()
                    if m["recorrente"] and r in df_rub.index]
     rec_corrente = df_rub.loc[recorrentes].sum()
-    rcl = rec_corrente * (1.0 - C.FATOR_DEDUCAO_RCL)
+    rcl = rec_corrente * (1.0 - fatores_rcl())
 
     out = df_rub.copy()
     out.loc["RECEITA_CORRENTE"] = rec_corrente
     out.loc["RCL"] = rcl
+    # componentes da RCL (transparência: nunca só o agregado)
+    out.loc["RCL_DED_MUNICIPIOS"] = rec_corrente * C.FATOR_DEDUCAO_RCL
+    out.loc["RCL_DED_CONTRIB_SERV"] = rec_corrente * C.FATOR_CONTRIB_SERVIDORES
+    out.loc["RCL_DED_INTRA"] = rec_corrente * C.FATOR_INTRAORCAMENTARIA
     return out
 
 

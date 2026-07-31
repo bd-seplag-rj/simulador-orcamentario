@@ -193,6 +193,15 @@ RUBRICAS = {
         "recorrente": True,
         "grupo": "Contribuições",
     },
+    "fundeb": {
+        "label": "FUNDEB (recebido)",
+        "dono": "SEEDUC + SEFAZ",
+        "driver": "Impostos estaduais + matrículas",
+        "modelo_pldo": "Cálculo normativo",
+        "frequencia": "Mensal",
+        "recorrente": True,
+        "grupo": "Transferências",
+    },
     "outras_correntes": {
         "label": "Outras receitas correntes",
         "dono": "Diversos",
@@ -240,28 +249,83 @@ RUBRICAS = {
 #    A calibração (receita.py) ajusta pessoal e estoque de dívida para
 #    reproduzir as razões do PLDO no cenário-base.
 # ---------------------------------------------------------------------------
+# DADOS REAIS — Previsão Inicial 2026 (LOA), planilha SIGFIS, receita BRUTA
+# por rubrica (categorias 1+2+7; as deduções da categoria 9 NÃO entram aqui,
+# são aplicadas via FATOR_DEDUCAO_RCL — incluí-las causaria dupla contagem).
+#
+# Por que Previsão Inicial e não a realizada anualizada? A realizada cobre
+# 7/12 meses e várias rubricas são fortemente sazonais (o IPVA já realizou 87%
+# da previsão até julho); anualizar por run-rate superestimaria essas rubricas.
+# A aderência realizado × previsto é acompanhada como KPI na aba Receita.
 BASELINE_2026 = {
-    # rubrica -> R$ bi em 2026
-    "icms": 52.0,
-    "fecp": 2.60,
-    "ipva": 6.50,
-    "itd": 1.20,
-    "irrf": 7.00,
-    "royalties_pe": 30.70,      # com Brent/câmbio/produção nas âncoras => 30,7 em 2027
-    "fpe_ipiexp": 5.50,
-    "rpps": 9.00,
-    "outras_correntes": 12.20,
+    # rubrica -> R$ bi em 2026 (previsão inicial, bruta)
+    "icms": 57.32,
+    "fecp": 7.28,
+    "ipva": 5.58,
+    "itd": 1.74,
+    "irrf": 7.70,
+    "royalties_pe": 21.52,      # ver DIVERGENCIAS_CONHECIDAS["royalties_pldo"]
+    "fpe_ipiexp": 5.66,
+    "rpps": 8.18,
+    "fundeb": 4.24,
+    "outras_correntes": 20.49,
     # não recorrentes (informativo; não entram na base recorrente)
     "lc194_2022": 1.20,
     "op_credito": 0.0,
     "divida_ativa": 1.50,
-    "_fonte": "[CALIBRACAO-PROTOTIPO] — substituir por RREO/RGF oficial",
+    "_fonte": "SIGFIS — Previsão Inicial 2026 (LOA). Reconciliar com RREO/RGF.",
 }
 
-# Parcela das receitas correntes deduzida para chegar à RCL
-# (transf. constitucionais a municípios, dedução FUNDEB, etc.).
-# [CALIBRACAO-PROTOTIPO] — ajustar ao cálculo normativo do RGF.
-FATOR_DEDUCAO_RCL = 0.235   # ~23,5% de deduções sobre receita corrente bruta
+# ---------------------------------------------------------------------------
+# COMPOSIÇÃO DA RCL — art. 2º, IV da LRF (fatores MEDIDOS no dado real)
+#
+#   RCL = receitas correntes
+#         − parcelas entregues aos Municípios por determinação constitucional
+#         − contribuição dos servidores ao seu regime de previdência
+#         − receitas de compensação financeira entre regimes
+#         (e SEM as receitas intraorçamentárias, que são duplicação)
+#
+# Cada parcela é fração da receita corrente bruta do baseline (139,71 bi):
+#   deduções constitucionais/legais (COD NR cat 9) .... 32,09 bi
+#   contribuições dos servidores (COD NR 1215*) ......   4,63 bi
+#   intraorçamentárias (COD NR cat 7) ................   8,46 bi
+# Validação cruzada: a RCL assim apurada (~94 bi) reproduz os 68,57% de
+# pessoal/RCL do PLDO 2027 (calculado: 67,5%). Com o fator antigo (0,2306
+# sobre o bruto) a RCL saía 107 bi e o indicador caía para ~59%.
+# ---------------------------------------------------------------------------
+FATOR_DEDUCAO_RCL = 0.2297        # deduções constitucionais (cota-parte, FUNDEB)
+FATOR_CONTRIB_SERVIDORES = 0.0331  # contribuições dos segurados ao RPPS
+FATOR_INTRAORCAMENTARIA = 0.0605   # duplicações (receita intra)
+
+# Soma das exclusões aplicadas à receita corrente bruta para chegar à RCL.
+FATORES_RCL_FONTE = ("Medidos na planilha SIGFIS (Previsão Inicial 2026). "
+                     "[VALIDAR-SEFAZ] conferir contra o RGF publicado.")
+
+# Divergências conhecidas entre o dado real e o PLDO — exibidas no painel.
+DIVERGENCIAS_CONHECIDAS = {
+    "royalties_pldo": {
+        "titulo": "R&PE: PLDO 2027 (R$ 30,7 bi) × LOA 2026 (R$ 21,5 bi)",
+        "detalhe": (
+            "A previsão inicial 2026 para royalties e participação especial é de "
+            "R$ 21,5 bi (bruta), enquanto o PLDO projeta ~R$ 30,7 bi para 2027 "
+            "(+43%). A arrecadação realizada está acima do orçado (R$ 15,7 bi em "
+            "7 meses, ritmo anual ~R$ 27 bi), o que explica parte da diferença; "
+            "o restante depende de premissas de Brent, câmbio e curva de produção."
+        ),
+        "acao": "[VALIDAR-SEFAZ] confirmar a premissa de R&PE do PLDO 2027.",
+    },
+    "pessoal_dtp": {
+        "titulo": "Pessoal/RCL: GND 1 pago × Despesa Total com Pessoal (LRF)",
+        "detalhe": (
+            "O painel calcula Pessoal/RCL como GND 1 (pago, anualizado) ÷ RCL "
+            "estimada. Não é a Despesa Total com Pessoal (DTP) da LRF, que tem "
+            "regras próprias (inativos e pensionistas, deduções de IRRF e "
+            "sentenças judiciais, terceirização). Por isso o indicador pode "
+            "divergir dos 68,57% do PLDO."
+        ),
+        "acao": "[VALIDAR-SEFAZ/JURIDICO] apurar DTP conforme RGF antes de decidir.",
+    },
+}
 
 # ---------------------------------------------------------------------------
 # 4) ELASTICIDADES / FATORES DE PROJEÇÃO POR RUBRICA
@@ -307,6 +371,12 @@ ELASTICIDADES = {
     "rpps": {
         "fator_vegetativo": 0.0344,  # acompanha folha
         "fonte": "Atuarial / folha [VALIDAR-RIOPREVIDENCIA]",
+    },
+    "fundeb": {
+        # segue a base de impostos estaduais (PIB real + inflação)
+        "e_pib_real": 1.00,
+        "passthrough_ipca": 1.00,
+        "fonte": "Cálculo normativo sobre impostos estaduais [VALIDAR-SEEDUC]",
     },
     "outras_correntes": {
         "passthrough_ipca": 1.00,
@@ -374,8 +444,54 @@ PROPAG = {
 # ---------------------------------------------------------------------------
 # 7) LIMITES LRF / VINCULAÇÕES  [VALIDAR-JURIDICO]
 # ---------------------------------------------------------------------------
+# Sublimites por Poder — art. 20, II da LRF (Estados). Somam 60%.
+LRF_SUBLIMITES = {
+    "Executivo": 0.49,          # inclui PGE e Defensoria Pública [VALIDAR-JURIDICO]
+    "Judiciário": 0.06,
+    "Legislativo": 0.03,        # inclui Tribunal de Contas
+    "Ministério Público": 0.02,
+}
+
+# DTP — Despesa Total com Pessoal (art. 18) e deduções (art. 19, § 1º).
+# O que ENTRA: GND 1 (pessoal e encargos), incluindo ativos, inativos e
+# pensionistas, de todos os Poderes.
+# O que SAI (deduções), quando identificável na base:
+DTP_DEDUCOES = {
+    "precatorios_periodo_anterior": {
+        "ativo": True,
+        "regra": "Tit Ação contém PRECAT/SENTEN",
+        "base_legal": "art. 19, § 1º, IV — decisão judicial de período anterior",
+    },
+    "indenizacao_demissao_pdv": {
+        "ativo": True,
+        "regra": "Tit Ação contém INDENIZ/DEMISS/VOLUNT",
+        "base_legal": "art. 19, § 1º, I e II",
+    },
+    "inativos_recursos_vinculados": {
+        # DESLIGADO por padrão: no ERJ os inativos são custeados sobretudo por
+        # royalties (fonte STN 704) e pelo Tesouro, e não pela arrecadação de
+        # contribuições dos segurados. Ligar esta dedução derruba o indicador
+        # de ~67% para ~39% e afasta o resultado do PLDO (68,57%).
+        "ativo": False,
+        "fontes_stn_dedutiveis": [800, 801, 802, 803],
+        "regra": "Função 9 (Previdência) custeada por fonte vinculada ao RPPS",
+        "base_legal": "art. 19, § 1º, VI — inativos custeados por recursos "
+                      "provenientes de contribuições dos segurados, compensação "
+                      "financeira e receitas do fundo",
+        "alerta": "[VALIDAR-JURIDICO] O enquadramento dos royalties (fonte 704) "
+                  "como 'receita diretamente arrecadada por fundo vinculado' é "
+                  "controverso e muda materialmente o indicador.",
+    },
+}
+
+DTP_STATUS_VALIDACAO = (
+    "[VALIDAR-SEFAZ/JURIDICO] A apuração oficial da DTP é do RGF. Este cálculo "
+    "reproduz as regras dos arts. 18-19 da LRF sobre a base disponível "
+    "(GND 1 pago) e deve ser reconciliado antes de embasar decisão."
+)
+
 LRF = {
-    "pessoal_rcl_teto": 0.60,        # 60% RCL (Poder Executivo — art. 20 LRF)
+    "pessoal_rcl_teto": 0.60,        # 60% RCL (total do ente — art. 20 LRF)
     "pessoal_rcl_alerta": 0.54,      # 90% do teto (limite de alerta)
     "pessoal_rcl_prudencial": 0.57,  # 95% do teto (limite prudencial)
     "saude_min": 0.12,               # 12% (EC 29)

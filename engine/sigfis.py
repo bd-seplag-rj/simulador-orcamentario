@@ -40,18 +40,39 @@ _RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 _RE_MES = re.compile(r"^([1-9]\d?) - (.+)$")
 
-# COD NR (natureza da receita) -> rubrica do motor
+# Naturezas de petróleo — LISTA EXPLÍCITA (auditável). Um prefixo curto não
+# serve: "139999011" pegava só as pré-sal (110/111) e perdia 103/105/106/107/108;
+# já "13999901" incluiria 1399990101 (Outras Receitas Patrimoniais), que não é
+# petróleo.
+NATUREZAS_PETROLEO = [
+    "1399990103",  # Royalties até 5%
+    "1399990105",  # Royalties excedente a 5%
+    "1399990106",  # Participação Especial
+    "1399990107",  # Fundo Especial do Petróleo (FEP)
+    "1399990108",  # Royalties até 5% — PRÉ-SAL
+    "1399990110",  # Royalties excedente a 5% — PRÉ-SAL
+    "1399990111",  # Participação Especial — PRÉ-SAL
+]
+
+# COD NR (natureza da receita) -> rubrica do motor.
+# ATENÇÃO: "11125" NÃO serve para IPVA — captura também o ITD (111252).
+# IPVA = 111251 · ITD = 111252.
 MAPA_NATUREZA = [
     ("1114501", "icms"),
     ("1114502", "fecp"),
-    ("11125", "ipva"),
-    ("11121", "itd"),
-    ("11130", "irrf"),
-    ("11131", "irrf"),
-    ("139999011", "royalties_pe"),
-    ("17115", "fpe_ipiexp"),
+    ("111251", "ipva"),
+    ("111252", "itd"),
+    ("1113", "irrf"),
+    ("17115", "fpe_ipiexp"),   # cobre FPE (1711500) e IPI-Exp (1711530)
     ("17515", "fundeb"),
+    ("1215", "rpps"),          # contribuições RPPS (civil/militar)
+    ("7215", "rpps"),          # intraorçamentária patronal RPPS
 ]
+
+# Categoria econômica pelo 1º dígito do COD NR:
+#   1 correntes · 2 capital · 7 intraorçamentárias · 9 DEDUÇÕES (negativas)
+CATEGORIAS_RECEITA_BRUTA = ("1", "2", "7")
+CATEGORIA_DEDUCAO = "9"
 
 
 def _achar(palavra: str) -> str | None:
@@ -258,10 +279,46 @@ def carregar_receita(caminho: str | None = None) -> ReceitaSigfis:
 
 def _rubrica_natureza(cod: str) -> str:
     c = str(cod).strip()
+    if c == "-":
+        return "movimentacao"
+    if c in NATUREZAS_PETROLEO:
+        return "royalties_pe"
     for pref, rub in MAPA_NATUREZA:
         if c.startswith(pref):
             return rub
-    return "outras_correntes" if c != "-" else "movimentacao"
+    return "outras_correntes"
+
+
+def categoria_economica(cod: str) -> str:
+    """1º dígito do COD NR: 1/2/7 = receita; 9 = dedução (valor negativo)."""
+    c = str(cod).strip()
+    return c[0] if c and c[0].isdigit() else "?"
+
+
+def baseline_por_rubrica(rs: "ReceitaSigfis", usar: str = "Previsão Inicial") -> dict:
+    """Receita BRUTA por rubrica (R$ bi), excluindo as deduções (categoria 9).
+
+    As deduções (cota-parte de municípios, FUNDEB) são tratadas à parte pelo
+    fator de dedução da RCL — misturá-las nas rubricas causaria DUPLA CONTAGEM,
+    porque o motor já aplica FATOR_DEDUCAO_RCL sobre a receita bruta.
+    """
+    d = rs.classificada.copy()
+    d["cat"] = d["COD NR"].map(categoria_economica)
+    bruto = d[d["cat"].isin(CATEGORIAS_RECEITA_BRUTA)]
+    g = bruto.groupby("rubrica")[usar].sum() * C.DB_ESCALA_PARA_BI
+    return {k: float(v) for k, v in g.items()}
+
+
+def fator_deducao_rcl(rs: "ReceitaSigfis", usar: str = "Previsão Inicial") -> dict:
+    """Deduções ÷ receitas correntes brutas (cat 1 + 7), medido no dado real."""
+    d = rs.classificada.copy()
+    d["cat"] = d["COD NR"].map(categoria_economica)
+    esc = C.DB_ESCALA_PARA_BI
+    correntes = d[d["cat"].isin(("1", "7"))][usar].sum() * esc
+    deducoes = abs(d[d["cat"] == CATEGORIA_DEDUCAO][usar].sum() * esc)
+    return {"correntes_brutas": correntes, "deducoes": deducoes,
+            "fator": (deducoes / correntes) if correntes else 0.0,
+            "rcl_implicita": correntes - deducoes}
 
 
 def receita_por_ug(rs: ReceitaSigfis) -> pd.DataFrame:

@@ -521,8 +521,9 @@ cen_ativo = R.Cenario(
     investimento_executado_frac=inv_exec,
     descricao=presets[preset_key].descricao,
 )
-res = S.avaliar_cenario(cen_ativo, anchors, base_despesa)
-res_presets = {k: S.avaliar_cenario(v, anchors, base_despesa) for k, v in presets.items()}
+res = S.avaliar_cenario(cen_ativo, anchors, base_despesa, ds)
+res_presets = {k: S.avaliar_cenario(v, anchors, base_despesa, ds)
+               for k, v in presets.items()}
 
 
 # ===========================================================================
@@ -832,10 +833,83 @@ with tabs[6]:
         frac = min(1.0, it["valor"] / (it["limite"] * (2 if it["tipo"] == "teto" else 1)))
         st.progress(frac)
 
-    st.markdown("#### Destaque permanente")
-    st.error("Pessoal e encargos projetados em **68,57% da RCL** (PLDO 2027), acima do "
-             "teto de 60% da LRF — é o indicador que mais restringe o espaço de alocação.",
-             icon="🔴")
+    # ------------------------------------------------------------------
+    # DTP — Despesa Total com Pessoal (LRF arts. 18-20)
+    # ------------------------------------------------------------------
+    st.divider()
+    st.markdown("### ⚖️ Despesa Total com Pessoal (DTP) — LRF arts. 18 a 20")
+    if res.dtp is None:
+        st.info("A apuração da DTP requer a planilha SIGFIS. Selecione "
+                "**Planilha SIGFIS** na aba *Execução (SIAFE)*.", icon="📄")
+        _p_pldo = C.ANCORAS_PLDO_2027["pessoal_sobre_rcl"] * 100
+        st.caption(f"Referência do PLDO 2027: {_p_pldo:.2f}% da RCL.")
+    else:
+        t = res.dtp
+        _p_pldo = C.ANCORAS_PLDO_2027["pessoal_sobre_rcl"] * 100
+        d1 = st.columns(4)
+        d1[0].metric("DTP / RCL (apurada)", f"{t.razao*100:.2f}%",
+                     f"{t.razao*100-t.limite*100:+.2f} p.p. vs teto de 60%",
+                     delta_color="inverse")
+        d1[1].metric("DTP líquida", f"R$ {t.dtp_liquida:.2f} bi",
+                     f"bruta {t.dtp_bruta:.2f}")
+        d1[2].metric("RCL (LRF)", f"R$ {t.rcl:.2f} bi")
+        d1[3].metric("Referência PLDO 2027", f"{_p_pldo:.2f}%",
+                     f"{t.razao*100-_p_pldo:+.2f} p.p. vs apurado",
+                     delta_color="off")
+        if abs(t.razao * 100 - _p_pldo) <= 3:
+            st.success(f"✅ Reconciliação: a DTP apurada ({t.razao*100:.2f}%) fica a "
+                       f"{abs(t.razao*100-_p_pldo):.2f} p.p. da referência do PLDO "
+                       f"({_p_pldo:.2f}%) — metodologias compatíveis.", icon="✅")
+
+        cA, cB = st.columns(2)
+        with cA:
+            st.markdown("**Composição da DTP**")
+            comp = pd.DataFrame([{"Componente": k, "R$ bi": v}
+                                 for k, v in t.componentes.items()])
+            fig = go.Figure(go.Bar(x=comp["R$ bi"], y=comp["Componente"],
+                                   orientation="h", marker_color="#6a51a3"))
+            fig.update_layout(height=240, margin=dict(t=10, b=10), xaxis_title="R$ bi",
+                              yaxis=dict(autorange="reversed"))
+            st.plotly_chart(fig, width='stretch')
+        with cB:
+            st.markdown("**Deduções aplicadas (art. 19, § 1º)**")
+            if t.deducoes:
+                for k, v in t.deducoes.items():
+                    st.markdown(f"- {k}: **R$ {v:.3f} bi**")
+            tot_ded = sum(t.deducoes.values())
+            st.caption(f"Total deduzido: R$ {tot_ded:.3f} bi "
+                       f"({tot_ded/t.dtp_bruta*100:.2f}% da DTP bruta)")
+            for o in t.observacoes:
+                st.caption("• " + o)
+
+        st.markdown("**Sublimites por Poder (art. 20, II)**")
+        pp = t.por_poder.copy()
+
+        def _cor(s):
+            return [f"color: {CORES.get(v, '#888')}; font-weight:700" for v in s]
+        st.dataframe(pp.style.apply(_cor, subset=["Status"]).format({
+            "DTP (R$ bi)": "{:.2f}", "% da RCL": "{:.2f}",
+            "Limite %": "{:.0f}", "Margem p.p.": "{:+.2f}"}),
+            width='stretch', hide_index=True)
+        st.caption(C.DTP_STATUS_VALIDACAO)
+
+        with st.expander("Como a DTP é apurada aqui (e onde ela difere do RGF)"):
+            st.markdown(
+                "**Entra (art. 18):** GND 1 — Pessoal e Encargos Sociais, de todos os "
+                "Poderes, incluindo ativos, inativos e pensionistas.\n\n"
+                "**Sai (art. 19, § 1º):** indenizações por demissão e PDV; despesas de "
+                "decisão judicial de período anterior (precatórios); inativos custeados "
+                "por recursos vinculados ao RPPS — *esta última está desligada*, porque "
+                "no ERJ os inativos são custeados sobretudo por royalties (fonte STN 704) "
+                "e pelo Tesouro, e não pela arrecadação de contribuições dos segurados. "
+                "Ligá-la derrubaria o indicador de ~67% para ~39%.\n\n"
+                "**RCL (art. 2º, IV):** receitas correntes menos as parcelas entregues aos "
+                "Municípios, as contribuições dos servidores ao RPPS e as receitas "
+                "intraorçamentárias.\n\n"
+                "**Diferenças conhecidas para o RGF:** a LRF apura em 12 meses e aqui há "
+                f"{t.n_meses} meses anualizados; a base é o estágio *pago*; o "
+                "enquadramento da Defensoria Pública no Executivo e a atribuição de "
+                "Poder dos inativos são heurísticas.")
 
 
 # ===========================================================================
@@ -860,6 +934,25 @@ with tabs[7]:
         for drv, m in C.DRIVERS_MACRO.items()
     ]).set_index("Driver")
     st.dataframe(fr, width='stretch')
+
+    st.markdown("#### Divergências conhecidas (dado real × PLDO)")
+    st.caption("Apuradas na auditoria dos índices. Reexecute com "
+               "`python scripts/auditoria_indices.py`.")
+    for _k, _d in C.DIVERGENCIAS_CONHECIDAS.items():
+        with st.expander(f"⚖️ {_d['titulo']}"):
+            st.markdown(_d["detalhe"])
+            st.info(_d["acao"], icon="🔍")
+
+    st.markdown("#### Base de receita (origem dos números)")
+    st.caption(C.BASELINE_2026["_fonte"] +
+               f" · fator de dedução da RCL medido no dado real: "
+               f"{C.FATOR_DEDUCAO_RCL:.4f}")
+    _bl = pd.DataFrame([
+        {"Rubrica": C.RUBRICAS[r]["label"], "Baseline 2026 (R$ bi)": v}
+        for r, v in C.BASELINE_2026.items()
+        if r in C.RUBRICAS and C.RUBRICAS[r]["recorrente"]
+    ]).set_index("Rubrica")
+    st.dataframe(_bl.round(2), width='stretch')
 
     st.markdown("#### Pendências de validação (governança de modelos)")
     st.markdown(

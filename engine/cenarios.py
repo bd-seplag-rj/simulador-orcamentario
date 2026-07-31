@@ -90,14 +90,19 @@ class ResultadoCenario:
     qualidade: dict                   # {ano: dict}
     despesa: dict = field(default_factory=dict)   # {ano: {categoria: R$ bi, ...}}
     fonte_despesa: str = "prototipo"  # "real (painel_subor)" quando há banco
+    dtp: object = None                # ResultadoDTP do ano-base (LRF arts.18-19)
     alertas: list = field(default_factory=list)
 
 
 def avaliar_cenario(cen: R.Cenario, anchors: R.Anchors,
-                    base_despesa=None) -> ResultadoCenario:
-    """Avalia um cenário. Se `base_despesa` (engine.despesa.BaseDespesa) for
-    fornecida, a DESPESA vem da execução real (painel_subor) e substitui as
-    premissas [CALIBRACAO-PROTOTIPO]; caso contrário usa o modelo-protótipo."""
+                    base_despesa=None, sigfis_despesa=None) -> ResultadoCenario:
+    """Avalia um cenário.
+
+    `base_despesa` (engine.despesa.BaseDespesa): despesa real por GND, substitui
+        as premissas [CALIBRACAO-PROTOTIPO].
+    `sigfis_despesa` (engine.sigfis.DespesaSigfis): habilita a apuração da DTP
+        da LRF (arts. 18-19) — deduções e sublimites por Poder.
+    """
     df = R.agregar(R.projetar_receitas(cen))
     pessoal = R.trajetoria_pessoal(anchors)
     divida = R.trajetoria_divida(anchors, cen)
@@ -106,6 +111,21 @@ def avaliar_cenario(cen: R.Cenario, anchors: R.Anchors,
     if base_despesa is not None:
         from . import despesa as D
         desp_proj = D.projetar_despesa(base_despesa, cen)
+
+    # DTP apurada no ano-base; a razão de deduções é levada aos anos projetados.
+    dtp_base = None
+    fator_dtp = 1.0
+    if sigfis_despesa is not None:
+        from . import dtp as DTP
+        # A DTP é apurada no ANO-BASE (dado real), então precisa da RCL do
+        # mesmo ano — comparar despesa de 2026 com RCL de 2027 distorceria.
+        rec_corrente_base = sum(
+            C.BASELINE_2026[r] for r, m in C.RUBRICAS.items()
+            if m["recorrente"] and r in C.BASELINE_2026)
+        rcl_base = rec_corrente_base * (1.0 - R.fatores_rcl())
+        dtp_base = DTP.calcular_dtp(sigfis_despesa, rcl_base, anualizar=True)
+        if dtp_base.dtp_bruta:
+            fator_dtp = dtp_base.dtp_liquida / dtp_base.dtp_bruta
 
     capag, propag, lrf, qualidade, despesa = {}, {}, {}, {}, {}
     servico = {}
@@ -173,8 +193,11 @@ def avaliar_cenario(cen: R.Cenario, anchors: R.Anchors,
         base_se = float(df.loc[["icms", "ipva", "itd", "fpe_ipiexp"], ano].sum())
         aplic_saude = base_se * 0.12          # protótipo: exatamente no piso
         aplic_educacao = base_se * 0.25
+        # Pessoal para a LRF: quando há DTP apurada, aplica a razão de deduções
+        # do art. 19 §1º ao pessoal projetado (GND 1 -> DTP).
+        pessoal_lrf = pessoal_ano * fator_dtp
         lrf[ano] = I.calcular_lrf(
-            ano, pessoal=pessoal_ano, rcl=rcl, dcl=dcl,
+            ano, pessoal=pessoal_lrf, rcl=rcl, dcl=dcl,
             aplic_saude=aplic_saude, aplic_educacao=aplic_educacao,
             base_saude_educ=base_se,
         )
@@ -194,5 +217,6 @@ def avaliar_cenario(cen: R.Cenario, anchors: R.Anchors,
         capag=capag, propag=propag, lrf=lrf, qualidade=qualidade,
         despesa=despesa,
         fonte_despesa=("real (painel_subor)" if base_despesa is not None else "prototipo"),
+        dtp=dtp_base,
         alertas=alertas,
     )
