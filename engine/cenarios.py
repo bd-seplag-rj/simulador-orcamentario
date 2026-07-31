@@ -22,6 +22,7 @@ from . import receita as R
 from . import indicadores as I
 
 
+
 # ---------------------------------------------------------------------------
 # Cenários pré-definidos (deltas sobre a âncora do PLDO)
 # ---------------------------------------------------------------------------
@@ -87,15 +88,26 @@ class ResultadoCenario:
     propag: dict                      # {ano: PropagResultado}
     lrf: dict                         # {ano: LRFResultado}
     qualidade: dict                   # {ano: dict}
+    despesa: dict = field(default_factory=dict)   # {ano: {categoria: R$ bi, ...}}
+    fonte_despesa: str = "prototipo"  # "real (painel_subor)" quando há banco
     alertas: list = field(default_factory=list)
 
 
-def avaliar_cenario(cen: R.Cenario, anchors: R.Anchors) -> ResultadoCenario:
+def avaliar_cenario(cen: R.Cenario, anchors: R.Anchors,
+                    base_despesa=None) -> ResultadoCenario:
+    """Avalia um cenário. Se `base_despesa` (engine.despesa.BaseDespesa) for
+    fornecida, a DESPESA vem da execução real (painel_subor) e substitui as
+    premissas [CALIBRACAO-PROTOTIPO]; caso contrário usa o modelo-protótipo."""
     df = R.agregar(R.projetar_receitas(cen))
     pessoal = R.trajetoria_pessoal(anchors)
     divida = R.trajetoria_divida(anchors, cen)
 
-    capag, propag, lrf, qualidade = {}, {}, {}, {}
+    desp_proj = None
+    if base_despesa is not None:
+        from . import despesa as D
+        desp_proj = D.projetar_despesa(base_despesa, cen)
+
+    capag, propag, lrf, qualidade, despesa = {}, {}, {}, {}, {}
     servico = {}
     alertas = []
 
@@ -104,21 +116,34 @@ def avaliar_cenario(cen: R.Cenario, anchors: R.Anchors) -> ResultadoCenario:
         rec_corrente = float(df.loc["RECEITA_CORRENTE", ano])
         dc = divida[ano]["dc"]
         dcl = divida[ano]["dcl"]
-
-        # Serviço da dívida (protótipo): juros de caixa ~ Selic sobre o estoque
-        # + amortização padrão + choque do cenário. [CALIBRACAO-PROTOTIPO]
-        selic = cen.d("selic", ano) / 100.0
-        juros = dc * (selic * 0.30)          # juros efetivos de caixa
-        amortizacao = dc * 0.02
         choque = divida[ano]["choque"]
-        servico_base = juros + amortizacao
-        servico[ano] = servico_base + choque
 
-        # Despesa corrente (protótipo): pessoal (folha calibrada) + custeio
-        # (outras desp. correntes primárias, fração da RCL) + juros. A amortização
-        # é despesa de capital e não entra na poupança corrente.
-        custeio = rcl * 0.44                  # [CALIBRACAO-PROTOTIPO]
-        despesa_corrente = pessoal[ano] + custeio + juros + choque * 0.6
+        if desp_proj is not None:
+            # --- DESPESA REAL (execução painel_subor) ---
+            dsp = desp_proj[ano]
+            pessoal_ano = dsp["pessoal"]
+            custeio = dsp["custeio"]
+            juros = dsp["juros"]
+            servico_base = dsp["juros"] + dsp["amortizacao"]
+            servico[ano] = dsp["servico_divida"]
+            despesa_corrente = dsp["despesa_corrente"]
+            despesa[ano] = dsp
+        else:
+            # --- DESPESA PROTÓTIPO [CALIBRACAO-PROTOTIPO] ---
+            selic = cen.d("selic", ano) / 100.0
+            juros = dc * (selic * 0.30)          # juros efetivos de caixa
+            amortizacao = dc * 0.02
+            servico_base = juros + amortizacao
+            servico[ano] = servico_base + choque
+            pessoal_ano = pessoal[ano]
+            custeio = rcl * 0.44                  # outras desp. correntes primárias
+            despesa_corrente = pessoal_ano + custeio + juros + choque * 0.6
+            despesa[ano] = {"pessoal": pessoal_ano, "juros": juros,
+                            "custeio": custeio, "amortizacao": amortizacao,
+                            "investimento": rcl * 0.05, "inversoes": 0.0,
+                            "choque": choque, "servico_divida": servico[ano],
+                            "despesa_corrente": despesa_corrente}
+
         rec_corr_ajustada = rec_corrente      # ajustes STN [VALIDAR-STN]
 
         # Caixa/obrigações (protótipo) para liquidez do CAPAG
@@ -134,7 +159,7 @@ def avaliar_cenario(cen: R.Cenario, anchors: R.Anchors) -> ResultadoCenario:
 
         # Propag — receita primária disponível = saldo primário corrente
         # (RCL menos despesas primárias correntes; exclui juros).
-        receita_primaria_disp = rcl - pessoal[ano] - custeio
+        receita_primaria_disp = rcl - pessoal_ano - custeio
         servico_pre_propag = servico_base  # sem choque
         propag[ano] = I.calcular_propag(
             ano, rcl=rcl, servico_divida=servico[ano],
@@ -149,7 +174,7 @@ def avaliar_cenario(cen: R.Cenario, anchors: R.Anchors) -> ResultadoCenario:
         aplic_saude = base_se * 0.12          # protótipo: exatamente no piso
         aplic_educacao = base_se * 0.25
         lrf[ano] = I.calcular_lrf(
-            ano, pessoal=pessoal[ano], rcl=rcl, dcl=dcl,
+            ano, pessoal=pessoal_ano, rcl=rcl, dcl=dcl,
             aplic_saude=aplic_saude, aplic_educacao=aplic_educacao,
             base_saude_educ=base_se,
         )
@@ -166,5 +191,8 @@ def avaliar_cenario(cen: R.Cenario, anchors: R.Anchors) -> ResultadoCenario:
     return ResultadoCenario(
         nome=cen.nome, descricao=cen.descricao, df_receita=df,
         pessoal=pessoal, divida=divida, servico_divida=servico,
-        capag=capag, propag=propag, lrf=lrf, qualidade=qualidade, alertas=alertas,
+        capag=capag, propag=propag, lrf=lrf, qualidade=qualidade,
+        despesa=despesa,
+        fonte_despesa=("real (painel_subor)" if base_despesa is not None else "prototipo"),
+        alertas=alertas,
     )

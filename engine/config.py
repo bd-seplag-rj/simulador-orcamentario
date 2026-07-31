@@ -411,3 +411,68 @@ CENARIO_ACO_3678 = {
     "propag_ativo": False,                # contrato não formalizado
     "fonte": "PLDO 2027 — risco fiscal dominante nomeado pela SEFAZ/RJ",
 }
+
+# ===========================================================================
+# 9) INTEGRAÇÃO COM O BANCO (execução de DESPESA — tabela painel_subor)
+#    Conecta o lado da despesa (SIAFE) para substituir as premissas
+#    [CALIBRACAO-PROTOTIPO] por execução real e atualizar os índices.
+#    Credenciais NÃO ficam aqui — vão em .streamlit/secrets.toml ou env vars
+#    (ver engine/db.py). Aqui ficam só nome da tabela e mapeamentos.
+# ===========================================================================
+DB_TABELA = "painel_subor"
+
+# Escala: os valores da tabela estão em REAIS; o motor trabalha em R$ bilhões.
+# Ajuste se a sua base já estiver em milhares/milhões.
+DB_ESCALA_PARA_BI = 1e-9   # reais -> R$ bi   (use 1e-6 se estiver em milhares)
+
+# Métrica de execução usada como "realizado" nos índices.
+# Opções: "Empenhado", "Liquidado", "Pago". Também exposta como controle na UI.
+DB_METRICA_PADRAO = "Empenhado"
+
+# Mapa lógico -> nome FÍSICO da coluna em painel_subor.
+# Nomes com espaço/acento são citados com crase (`) no SQL (ver db.py).
+# Se algum nome divergir, rode scripts/descobrir_dominios.py e ajuste aqui.
+COLS = {
+    "cod_gd": "Cod GD",
+    "tit_gd": "Tit GD",
+    "cod_uo": "Cod UO",
+    "tit_uo": "Tit UO",
+    "funcao": "Função",
+    "tit_funcao": "Tit Função",
+    "cod_poder": "Cod Poder",
+    "tit_poder": "Tit Poder",
+    "tipo_despesa": "tipo_despesa",
+    "fr_resultado": "fr_resultado",
+    "dot_inicial": "Dot. Inicial",
+    "dot_atual": "Dot. Atual",
+    "despesa_autorizada": "Despesa Autorizada",
+    "empenhado": "Empenhado",
+    "liquidado": "Liquidado",
+    "pago": "Pago",
+    "ano": "ano",
+    "mes": "mes",
+}
+
+# Mapa Grupo de Despesa (GND) -> categoria do motor.
+# A classificação usa o 1º dígito do "Cod GD" (padrão GND 1..6):
+#   1 Pessoal e Encargos | 2 Juros e Encargos da Dívida | 3 Outras Desp. Correntes
+#   4 Investimentos | 5 Inversões Financeiras | 6 Amortização da Dívida
+# Se a sua base codificar diferente, ajuste MAPA_GD_POR_DIGITO.
+MAPA_GD_POR_DIGITO = {
+    "1": "pessoal",
+    "2": "juros",
+    "3": "custeio",
+    "4": "investimento",
+    "5": "inversoes",
+    "6": "amortizacao",
+}
+# Correntes x capital (para poupança do CAPAG e serviço da dívida)
+CATEGORIAS_CORRENTES = ["pessoal", "juros", "custeio"]
+CATEGORIAS_CAPITAL = ["investimento", "inversoes", "amortizacao"]
+# Serviço da dívida = juros (corrente) + amortização (capital)
+CATEGORIAS_SERVICO_DIVIDA = ["juros", "amortizacao"]
+
+DB_STATUS_VALIDACAO = (
+    "[VALIDAR-SEFAZ] Confirmar métrica de execução (Empenhado/Liquidado/Pago), "
+    "escala dos valores e o mapeamento de Grupo de Despesa (GND)."
+)

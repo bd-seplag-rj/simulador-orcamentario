@@ -1,1 +1,14 @@
 /.claude
+
+# Segredos — NUNCA versionar credenciais
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# Streamlit
+.streamlit/cache/
