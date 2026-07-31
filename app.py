@@ -24,6 +24,7 @@ from engine import db as DB
 from engine import despesa as D
 from engine import dados_arquivo as DA
 from engine import focus as F
+from engine import sigfis as SG
 
 st.set_page_config(page_title="Simulador Orçamentário — ERJ / PLDO 2027",
                    page_icon="📊", layout="wide")
@@ -62,6 +63,26 @@ def _carregar_base_despesa(ano: int, metrica: str):
 @st.cache_data(show_spinner="Lendo arquivo exportado…")
 def _parse_arquivo(nome: str, conteudo: bytes) -> pd.DataFrame:
     return DA.ler_export(io.BytesIO(conteudo), nome=nome)
+
+
+@st.cache_resource(show_spinner="Lendo planilhas SIGFIS…")
+def _sigfis():
+    """Carrega os .xls reais de despesa e receita (se presentes na raiz)."""
+    out = {"despesa": None, "receita": None, "erro": None}
+    try:
+        out["despesa"] = SG.carregar_despesa()
+    except Exception as e:  # noqa: BLE001
+        out["erro"] = f"despesa: {e}"
+    try:
+        out["receita"] = SG.carregar_receita()
+    except Exception as e:  # noqa: BLE001
+        out["erro"] = f"{out['erro'] or ''} receita: {e}".strip()
+    return out
+
+
+SIG = _sigfis()
+MESES_PT = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+            "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
 
 
 def _status_banco():
@@ -183,17 +204,19 @@ with tabs[1]:
 # ===========================================================================
 with tabs[3]:
     st.subheader("Execução da despesa (SIAFE)")
+    _tem_sigfis = SIG["despesa"] is not None
+    _opcoes = (["Planilha SIGFIS (.xls local)"] if _tem_sigfis else []) + [
+        "Protótipo (sem dados)", "Arquivo exportado (CSV/Excel)", "Conexão direta (banco)"]
     fonte_dados = st.radio(
-        "Origem da despesa",
-        ["Protótipo (sem dados)", "Arquivo exportado (CSV/Excel)", "Conexão direta (banco)"],
-        horizontal=True,
-        help="Arquivo: exporte a tabela `despesa` no phpMyAdmin (Export → CSV) e "
-             "carregue aqui. Conexão direta requer MySQL acessível (Remote MySQL/SSH).")
+        "Origem da despesa", _opcoes, horizontal=True,
+        help="SIGFIS: planilha real já presente no projeto. Arquivo: export do "
+             "phpMyAdmin. Conexão direta requer MySQL acessível (Remote MySQL/SSH).")
 
     base_despesa = None
     df_funcao = None
     df_uo = None
     db_erro = None
+    ds = None   # DespesaSigfis quando a fonte é a planilha real
 
     def _seletor_metrica():
         return st.radio("Métrica de execução (estágio usado como “realizado”)",
@@ -201,7 +224,32 @@ with tabs[3]:
                         help="Empenhado = compromisso · Liquidado = bem/serviço reconhecido "
                              "· Pago = desembolso de caixa.")
 
-    if fonte_dados == "Arquivo exportado (CSV/Excel)":
+    if fonte_dados == "Planilha SIGFIS (.xls local)":
+        ds = SIG["despesa"]
+        st.success(f"📄 {ds.arquivo} · {len(ds.df):,} linhas · {ds.ano} · "
+                   f"acumulado até **{MESES_PT[ds.n_meses-1]}** ({ds.n_meses}/12 meses) · "
+                   f"estágio **Pago**", icon="✅")
+        anualizar = st.checkbox(
+            f"Anualizar a execução por run-rate (× 12/{ds.n_meses}) para alimentar os índices",
+            value=True,
+            help="Os dados cobrem apenas parte do ano. Sem anualizar, comparar "
+                 f"{ds.n_meses} meses de despesa com a receita ANUAL projetada "
+                 "subestima Pessoal/RCL, poupança do CAPAG e serviço da dívida.")
+        gd = SG.despesa_por_gd(ds, anualizar=anualizar)
+        base_despesa = D.montar_base_despesa(gd, ano_base=ds.ano, metrica="Pago")
+        df_funcao = SG.despesa_por_funcao(ds).rename(columns={"funcao": "tit_funcao"})
+        df_uo = SG.despesa_por_uo(ds).head(12)
+        if anualizar:
+            st.caption(f"⚙️ Índices calculados com despesa **anualizada** "
+                       f"(× {12/ds.n_meses:.2f}). Os quadros de análise abaixo mostram "
+                       "os valores **acumulados reais**, sem projeção.")
+        else:
+            st.warning("Índices usando execução parcial contra receita anual — "
+                       "Pessoal/RCL e poupança ficarão artificialmente baixos.", icon="⚠️")
+        st.caption("Este export traz apenas o estágio **Pago** (sem empenhado/liquidado), "
+                   "portanto não é possível apurar restos a pagar. [VALIDAR-SEFAZ]")
+
+    elif fonte_dados == "Arquivo exportado (CSV/Excel)":
         up = st.file_uploader("Arquivo da tabela `despesa`", type=["csv", "xlsx", "xls"],
                               help="phpMyAdmin → tabela `despesa` → Export → CSV → "
                                    "“Colunas na primeira linha”.")
@@ -280,7 +328,9 @@ with tabs[3]:
             "`SELECT * FROM despesa WHERE ano = 2026;` → Export.\n"
             "4. Baixe o `.csv` e carregue no campo acima.\n\n"
             "Detalhes e conexão direta em **INTEGRACAO_BANCO.md**.")
-    else:
+    elif ds is None:
+        # Bloco genérico (CSV / banco). Com SIGFIS, a "Análise geral" abaixo
+        # cobre isso com os valores acumulados reais, sem anualização.
         bd = base_despesa
         st.success(f"Fonte: {bd.fonte} · ano-base {bd.ano_base} · métrica {bd.metrica}",
                    icon="🟢")
@@ -324,6 +374,140 @@ with tabs[3]:
             else:
                 st.caption("Sem agregação por UO para esta fonte/ano.")
         st.caption(C.DB_STATUS_VALIDACAO)
+
+    # -------------------------------------------------------------------
+    # Análise geral + trajetória por UO (requer a planilha SIGFIS)
+    # -------------------------------------------------------------------
+    if ds is not None:
+        st.divider()
+        st.markdown("### 📈 Análise geral dos gastos")
+
+        serie_total = SG.serie_mensal_uo(ds)          # Estado inteiro
+        pago_total = float(serie_total.sum())
+        dot_total = float(ds.df["Dotação Atualizada"].sum() * C.DB_ESCALA_PARA_BI)
+        dot_ini = float(ds.df["Dotação Inicial"].sum() * C.DB_ESCALA_PARA_BI)
+        ritmo = ds.n_meses / 12.0
+        proj_ano = pago_total / ritmo                 # run-rate anualizado
+        # categorias em valores REAIS acumulados (sem anualizar) para esta seção
+        gd_real = SG.despesa_por_gd(ds, anualizar=False)
+        cat = gd_real.groupby("categoria")["execucao"].sum().to_dict()
+        obrig = sum(cat.get(k, 0.0) for k in ("pessoal", "juros", "amortizacao"))
+        discric = pago_total - obrig
+
+        a = st.columns(5)
+        a[0].metric("Pago acumulado", f"R$ {pago_total:.1f} bi",
+                    f"{ds.n_meses}/12 meses")
+        a[1].metric("Dotação atualizada", f"R$ {dot_total:.1f} bi",
+                    f"{(dot_total-dot_ini):+.1f} vs inicial")
+        a[2].metric("Execução", f"{pago_total/dot_total*100:.1f}%",
+                    f"ritmo linear {ritmo*100:.0f}%")
+        a[3].metric("Projeção run-rate", f"R$ {proj_ano:.1f} bi",
+                    f"{proj_ano/dot_total*100:.0f}% da dotação")
+        a[4].metric("Despesa obrigatória", f"{obrig/pago_total*100:.1f}%",
+                    f"discricionária {discric/pago_total*100:.1f}%",
+                    delta_color="off")
+        st.caption("Obrigatória = pessoal + juros + amortização (GND 1, 2 e 6). "
+                   "A discricionária é o espaço real de decisão do alocador.")
+
+        g1, g2 = st.columns([3, 2])
+        with g1:
+            st.markdown("**Trajetória mensal do Estado (Pago)**")
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=list(serie_total.index), y=list(serie_total.values),
+                                 name="Pago no mês", marker_color="#4575b4"))
+            fig.add_trace(go.Scatter(x=list(serie_total.index),
+                                     y=list(serie_total.cumsum().values),
+                                     name="Acumulado", mode="lines+markers",
+                                     yaxis="y2", line=dict(color="#d73027")))
+            fig.update_layout(height=340, margin=dict(t=10, b=10),
+                              yaxis=dict(title="R$ bi (mês)"),
+                              yaxis2=dict(title="acumulado", overlaying="y",
+                                          side="right", showgrid=False),
+                              legend=dict(orientation="h"))
+            st.plotly_chart(fig, width='stretch')
+        with g2:
+            st.markdown("**Composição por GND**")
+            rot_gnd = {"pessoal": "1 Pessoal", "juros": "2 Juros", "custeio": "3 Custeio",
+                       "investimento": "4 Investim.", "inversoes": "5 Inversões",
+                       "amortizacao": "6 Amortiz."}
+            it = [(rot_gnd[k], cat.get(k, 0.0)) for k in rot_gnd if cat.get(k, 0.0) > 0]
+            fig = go.Figure(go.Pie(labels=[i[0] for i in it], values=[i[1] for i in it],
+                                   hole=0.45))
+            fig.update_layout(height=340, margin=dict(t=10, b=10),
+                              legend=dict(orientation="h"))
+            st.plotly_chart(fig, width='stretch')
+
+        st.markdown("**Execução por função — onde o dinheiro está sendo gasto**")
+        dff = SG.despesa_por_funcao(ds).head(12).copy()
+        dff["execucao_pct"] = dff["execucao"] / dff["dot_atual"].replace(0, pd.NA) * 100
+        fig = go.Figure()
+        fig.add_trace(go.Bar(y=dff["funcao"], x=dff["dot_atual"], orientation="h",
+                             name="Dotação atualizada", marker_color="#c6dbef"))
+        fig.add_trace(go.Bar(y=dff["funcao"], x=dff["execucao"], orientation="h",
+                             name="Pago", marker_color="#2171b5"))
+        fig.update_layout(height=420, margin=dict(t=10, b=10), barmode="overlay",
+                          xaxis_title="R$ bi", yaxis=dict(autorange="reversed"),
+                          legend=dict(orientation="h"))
+        st.plotly_chart(fig, width='stretch')
+
+        # ---------------- Subseção: trajetória por UO ----------------
+        st.divider()
+        st.markdown("### 🏛️ Trajetória de gastos por Unidade Orçamentária")
+        todas_uo = SG.despesa_por_uo(ds)
+        opts = todas_uo["cod_uo"].tolist()
+        rotulos_uo = dict(zip(todas_uo["cod_uo"], todas_uo["tit_uo"]))
+        sel_uo = st.selectbox(
+            "Escolha a Unidade Orçamentária (UO)", opts,
+            format_func=lambda c: f"{rotulos_uo.get(c, '')} ({c})",
+            help="Ordenadas por valor pago. A trajetória mostra o gasto mês a mês.")
+        det = SG.detalhe_uo(ds, sel_uo)
+        serie_uo = SG.serie_mensal_uo(ds, sel_uo)
+
+        u = st.columns(5)
+        u[0].metric("Pago acumulado", f"R$ {det['pago']:.2f} bi")
+        u[1].metric("Dotação atualizada", f"R$ {det['dot_atual']:.2f} bi",
+                    f"{det['dot_atual']-det['dot_inicial']:+.2f} vs inicial")
+        u[2].metric("Execução", f"{det['execucao_pct']:.1f}%",
+                    f"{det['execucao_pct']-ritmo*100:+.1f} p.p. vs ritmo")
+        u[3].metric("Participação no Estado", f"{det['pago']/pago_total*100:.1f}%")
+        u[4].metric("Ações orçamentárias", f"{det['n_acoes']}")
+
+        t1, t2 = st.columns([3, 2])
+        with t1:
+            st.markdown(f"**{det['sigla']} — gasto mês a mês**")
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=list(serie_uo.index), y=list(serie_uo.values),
+                                 name="Pago no mês", marker_color="#238b45"))
+            fig.add_trace(go.Scatter(x=list(serie_uo.index),
+                                     y=list(serie_uo.cumsum().values),
+                                     name="Acumulado", mode="lines+markers",
+                                     yaxis="y2", line=dict(color="#d73027")))
+            media = float(serie_uo.mean())
+            fig.add_hline(y=media, line_dash="dot", line_color="#888",
+                          annotation_text=f"média R$ {media:.2f} bi")
+            fig.update_layout(height=360, margin=dict(t=10, b=10),
+                              yaxis=dict(title="R$ bi (mês)"),
+                              yaxis2=dict(title="acumulado", overlaying="y",
+                                          side="right", showgrid=False),
+                              legend=dict(orientation="h"))
+            st.plotly_chart(fig, width='stretch')
+        with t2:
+            st.markdown("**Por GND nesta UO**")
+            pc = det["por_categoria"]
+            it = [(rot_gnd.get(k, k), v) for k, v in pc.items() if v > 0]
+            it.sort(key=lambda x: -x[1])
+            if it:
+                fig = go.Figure(go.Bar(x=[i[1] for i in it], y=[i[0] for i in it],
+                                       orientation="h", marker_color="#238b45"))
+                fig.update_layout(height=360, margin=dict(t=10, b=10),
+                                  xaxis_title="R$ bi",
+                                  yaxis=dict(autorange="reversed"))
+                st.plotly_chart(fig, width='stretch')
+
+        with st.expander("Detalhe mensal por GND nesta UO"):
+            tab = SG.serie_mensal_uo_por_gnd(ds, sel_uo)
+            tab.index = [rot_gnd.get(i, i) for i in tab.index]
+            st.dataframe(tab.round(3), width='stretch')
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +637,111 @@ with tabs[2]:
         "Natureza": [C.RUBRICAS[r]["driver"] for r in nao_rec],
     }).set_index("Rubrica")
     st.dataframe(nr, width='stretch')
+
+    # =====================================================================
+    # Subseção: execução da receita por Unidade Gestora (dados reais SIGFIS)
+    # =====================================================================
+    rs = SIG["receita"]
+    if rs is None:
+        st.divider()
+        st.info("Planilha de receita do SIGFIS não encontrada na raiz do projeto — "
+                "a subseção por UG fica indisponível.", icon="📄")
+    else:
+        st.divider()
+        st.markdown("### 🏦 Previsão × Realização da receita por Unidade Gestora")
+        ug_tab = SG.receita_por_ug(rs)
+        tot_prev = float(ug_tab["previsao"].sum())
+        tot_real = float(ug_tab["realizada"].sum())
+        n_meses_rec = len(rs.meses)
+        ritmo_rec = n_meses_rec / 12.0
+
+        st.caption(f"Fonte: {rs.arquivo} · {len(rs.classificada):,} linhas classificadas · "
+                   f"acumulado até **{MESES_PT[n_meses_rec-1]}** ({n_meses_rec}/12 meses). "
+                   "Valores da coluna *Receitas Realizadas* (acumulada).")
+
+        opts_ug = ["__TODAS__"] + ug_tab["cod_ug"].tolist()
+        rot_ug = dict(zip(ug_tab["cod_ug"], ug_tab["nome_ug"]))
+        sel_ug = st.selectbox(
+            "Escolha a Unidade Gestora (UG)", opts_ug,
+            format_func=lambda c: ("▣ Todas as UGs (consolidado)" if c == "__TODAS__"
+                                   else f"{rot_ug.get(c, '')} ({c})"),
+            help="Ordenadas por receita realizada.")
+
+        if sel_ug == "__TODAS__":
+            prev, real = tot_prev, tot_real
+            titulo = "Consolidado — todas as UGs"
+            rub = SG.receita_por_rubrica(rs)
+            detalhe = None
+        else:
+            linha = ug_tab[ug_tab["cod_ug"] == sel_ug].iloc[0]
+            prev, real = float(linha["previsao"]), float(linha["realizada"])
+            titulo = f"{linha['nome_ug']} ({sel_ug})"
+            rub = SG.receita_por_rubrica(rs, sel_ug)
+            detalhe = SG.receita_detalhe_ug(rs, sel_ug)
+
+        pct = (real / prev * 100) if prev else 0.0
+        gap = pct - ritmo_rec * 100
+        m = st.columns(5)
+        m[0].metric("Previsão inicial (ano)", f"R$ {prev:.2f} bi")
+        m[1].metric("Realizada (acumulada)", f"R$ {real:.2f} bi")
+        m[2].metric("Realização", f"{pct:.1f}%", f"{gap:+.1f} p.p. vs ritmo")
+        m[3].metric("Projeção run-rate", f"R$ {real/ritmo_rec:.2f} bi",
+                    f"{(real/ritmo_rec)/prev*100-100:+.0f}% vs previsão" if prev else "")
+        m[4].metric("Participação no total", f"{real/tot_real*100:.1f}%" if tot_real else "—")
+        if gap < -5:
+            st.warning(f"⚠️ Arrecadação **abaixo do ritmo do ano** ({pct:.1f}% realizado "
+                       f"contra {ritmo_rec*100:.0f}% do calendário) — risco de frustração.",
+                       icon="⚠️")
+        elif gap > 5:
+            st.success(f"Arrecadação **acima do ritmo** ({pct:.1f}% vs {ritmo_rec*100:.0f}% "
+                       "do calendário).", icon="📈")
+
+        st.markdown(f"**{titulo} — previsão × realizada por rubrica**")
+        rub_p = rub[rub["previsao"] + rub["realizada"] > 0].head(12)
+        fig = go.Figure()
+        fig.add_trace(go.Bar(y=rub_p["label"], x=rub_p["previsao"], orientation="h",
+                             name="Previsão inicial (ano)", marker_color="#c6dbef"))
+        fig.add_trace(go.Bar(y=rub_p["label"], x=rub_p["realizada"], orientation="h",
+                             name=f"Realizada (até {MESES_PT[n_meses_rec-1]})",
+                             marker_color="#2171b5"))
+        fig.update_layout(height=380, margin=dict(t=10, b=10), barmode="overlay",
+                          xaxis_title="R$ bi", yaxis=dict(autorange="reversed"),
+                          legend=dict(orientation="h"))
+        st.plotly_chart(fig, width='stretch')
+
+        tabela = rub_p[["label", "previsao", "realizada", "realiz_pct"]].rename(
+            columns={"label": "Rubrica", "previsao": "Previsão (R$ bi)",
+                     "realizada": "Realizada (R$ bi)", "realiz_pct": "Realização %"})
+        st.dataframe(tabela.round(2), width='stretch', hide_index=True)
+
+        if detalhe is not None and not detalhe.empty:
+            with st.expander(f"Naturezas de receita desta UG ({len(detalhe)})"):
+                st.dataframe(
+                    detalhe[["COD NR", "TIT NR", "previsao", "realizada", "realiz_pct"]]
+                    .rename(columns={"COD NR": "Cód.", "TIT NR": "Natureza",
+                                     "previsao": "Previsão (R$ bi)",
+                                     "realizada": "Realizada (R$ bi)",
+                                     "realiz_pct": "Realização %"}).round(3),
+                    width='stretch', hide_index=True)
+
+        diag = SG.diagnostico_receita(rs, None if sel_ug == "__TODAS__" else sel_ug)
+        with st.expander("⚠️ Série mensal bruta — diagnóstico de qualidade do dado"):
+            st.error(
+                "As colunas mensais deste export **não representam arrecadação mensal**: "
+                f"a soma dos meses (R$ {diag['soma_mensal']:.1f} bi) diverge "
+                f"{diag['razao']:.1f}× da coluna acumulada *Receitas Realizadas* "
+                f"(R$ {diag['acumulada']:.1f} bi). Elas carregam movimentação financeira "
+                "bruta — ex.: o ICMS aparece com R$ 116 bi em Janeiro, acima da própria "
+                "previsão anual. Por isso o painel usa a coluna acumulada, e a série "
+                "mensal fica aqui apenas como diagnóstico. **[VALIDAR-SEFAZ]**", icon="🚨")
+            serie_r = SG.receita_serie_mensal(rs, None if sel_ug == "__TODAS__" else sel_ug)
+            fig = go.Figure(go.Bar(x=list(serie_r.index), y=list(serie_r.values),
+                                   marker_color="#fc8d59"))
+            fig.update_layout(height=260, margin=dict(t=10, b=10),
+                              yaxis_title="R$ bi (movimentação, não reconciliada)")
+            st.plotly_chart(fig, width='stretch')
+            st.caption(f"Linhas de movimentação/intra (natureza «-») excluídas das "
+                       f"agregações: R$ {diag['movimentacao_excluida']:.1f} bi.")
 
 
 # ===========================================================================
