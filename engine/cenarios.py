@@ -91,18 +91,25 @@ class ResultadoCenario:
     despesa: dict = field(default_factory=dict)   # {ano: {categoria: R$ bi, ...}}
     fonte_despesa: str = "prototipo"  # "real (painel_subor)" quando há banco
     dtp: object = None                # ResultadoDTP do ano-base (LRF arts.18-19)
+    vinculacoes: dict = field(default_factory=dict)  # {ano: {chave: ResultadoVinculacao}}
     alertas: list = field(default_factory=list)
 
 
 def avaliar_cenario(cen: R.Cenario, anchors: R.Anchors,
-                    base_despesa=None, sigfis_despesa=None) -> ResultadoCenario:
+                    base_despesa=None, sigfis_despesa=None,
+                    sigfis_receita=None, acrescimos=None) -> ResultadoCenario:
     """Avalia um cenário.
 
     `base_despesa` (engine.despesa.BaseDespesa): despesa real por GND, substitui
         as premissas [CALIBRACAO-PROTOTIPO].
     `sigfis_despesa` (engine.sigfis.DespesaSigfis): habilita a apuração da DTP
         da LRF (arts. 18-19) — deduções e sublimites por Poder.
+    `sigfis_receita` (engine.sigfis.ReceitaSigfis): habilita as vinculações
+        constitucionais apuradas sobre o dado real (MDE/ASPS).
+    `acrescimos`: despesa simulada a somar — {"poder": {...}, "vinculacao": {...}}
+        (o acréscimo por categoria já deve vir embutido em `base_despesa`).
     """
+    acrescimos = acrescimos or {}
     df = R.agregar(R.projetar_receitas(cen))
     pessoal = R.trajetoria_pessoal(anchors)
     divida = R.trajetoria_divida(anchors, cen)
@@ -123,11 +130,13 @@ def avaliar_cenario(cen: R.Cenario, anchors: R.Anchors,
             C.BASELINE_2026[r] for r, m in C.RUBRICAS.items()
             if m["recorrente"] and r in C.BASELINE_2026)
         rcl_base = rec_corrente_base * (1.0 - R.fatores_rcl())
-        dtp_base = DTP.calcular_dtp(sigfis_despesa, rcl_base, anualizar=True)
+        dtp_base = DTP.calcular_dtp(sigfis_despesa, rcl_base, anualizar=True,
+                                    acrescimo_por_poder=acrescimos.get("poder"))
         if dtp_base.dtp_bruta:
             fator_dtp = dtp_base.dtp_liquida / dtp_base.dtp_bruta
 
     capag, propag, lrf, qualidade, despesa = {}, {}, {}, {}, {}
+    vinculacoes = {}
     servico = {}
     alertas = []
 
@@ -140,7 +149,20 @@ def avaliar_cenario(cen: R.Cenario, anchors: R.Anchors,
 
         if desp_proj is not None:
             # --- DESPESA REAL (execução painel_subor) ---
-            dsp = desp_proj[ano]
+            dsp = dict(desp_proj[ano])
+            # acréscimo simulado, em valores DO ANO (não do ano-base, para que
+            # "R$ X bi em 2027" signifique exatamente X e não X corrigido)
+            acr_cat = acrescimos.get("categoria") or {}
+            if acr_cat and ano in set(acrescimos.get("anos", C.ANOS)):
+                for _cat, _val in acr_cat.items():
+                    dsp[_cat] = dsp.get(_cat, 0.0) + _val
+                dsp["servico_divida"] = (dsp.get("juros", 0.0)
+                                         + dsp.get("amortizacao", 0.0)
+                                         + dsp.get("choque", 0.0))
+                dsp["despesa_corrente"] = (dsp.get("pessoal", 0.0)
+                                           + dsp.get("custeio", 0.0)
+                                           + dsp.get("juros", 0.0)
+                                           + dsp.get("choque", 0.0) * 0.6)
             pessoal_ano = dsp["pessoal"]
             custeio = dsp["custeio"]
             juros = dsp["juros"]
@@ -189,18 +211,31 @@ def avaliar_cenario(cen: R.Cenario, anchors: R.Anchors,
         if propag[ano].alerta_resim and "FNDR rejeitado" not in " ".join(alertas):
             alertas.append("FNDR rejeitado ⇒ contrapartidas sobem a 2%/2% — re-simulação disparada.")
 
-        # LRF / vinculações (base saúde/educ = impostos + transferências)
+        # LRF / vinculações. Com dado real, apura MDE/ASPS de fato; a base do
+        # ano projetado escala pelo crescimento da receita frente ao ano-base.
         base_se = float(df.loc[["icms", "ipva", "itd", "fpe_ipiexp"], ano].sum())
         aplic_saude = base_se * 0.12          # protótipo: exatamente no piso
         aplic_educacao = base_se * 0.25
+        vinc_ano = None
+        if sigfis_receita is not None and sigfis_despesa is not None:
+            from . import vinculacoes as VC
+            rec_base_2026 = sum(
+                C.BASELINE_2026[r] for r, m in C.RUBRICAS.items()
+                if m["recorrente"] and r in C.BASELINE_2026)
+            escala = (rec_corrente / rec_base_2026) if rec_base_2026 else 1.0
+            base_vinc = VC.base_calculo(sigfis_receita)["base"] * escala
+            vinc_ano = VC.avaliar(sigfis_receita, sigfis_despesa,
+                                  acrescimos=acrescimos.get("vinculacao"),
+                                  base_override=base_vinc, escala=escala)
         # Pessoal para a LRF: quando há DTP apurada, aplica a razão de deduções
         # do art. 19 §1º ao pessoal projetado (GND 1 -> DTP).
         pessoal_lrf = pessoal_ano * fator_dtp
         lrf[ano] = I.calcular_lrf(
             ano, pessoal=pessoal_lrf, rcl=rcl, dcl=dcl,
             aplic_saude=aplic_saude, aplic_educacao=aplic_educacao,
-            base_saude_educ=base_se,
+            base_saude_educ=base_se, vinculacoes=vinc_ano,
         )
+        vinculacoes[ano] = vinc_ano
 
         qualidade[ano] = I.qualidade_receita(df, ano, rec_corrente)
 
@@ -217,6 +252,6 @@ def avaliar_cenario(cen: R.Cenario, anchors: R.Anchors,
         capag=capag, propag=propag, lrf=lrf, qualidade=qualidade,
         despesa=despesa,
         fonte_despesa=("real (painel_subor)" if base_despesa is not None else "prototipo"),
-        dtp=dtp_base,
+        dtp=dtp_base, vinculacoes=vinculacoes,
         alertas=alertas,
     )

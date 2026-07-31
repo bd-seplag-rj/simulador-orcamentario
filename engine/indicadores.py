@@ -188,15 +188,25 @@ def _status_piso(valor, piso):
 
 def calcular_lrf(ano: int, pessoal: float, rcl: float, dcl: float,
                  aplic_saude: float, aplic_educacao: float,
-                 base_saude_educ: float) -> LRFResultado:
+                 base_saude_educ: float, vinculacoes: dict | None = None
+                 ) -> LRFResultado:
     """Limites da LRF e vinculações constitucionais.
 
     base_saude_educ = base de cálculo (receita de impostos + transferências).
+    `vinculacoes`: resultados de engine.vinculacoes.avaliar() — quando presente,
+    substitui a estimativa sintética de saúde/educação pelo dado apurado.
     """
     pessoal_rcl = pessoal / rcl if rcl else float("inf")
     dcl_rcl = dcl / rcl if rcl else float("inf")
-    saude_pct = aplic_saude / base_saude_educ if base_saude_educ else 0.0
-    educ_pct = aplic_educacao / base_saude_educ if base_saude_educ else 0.0
+    if vinculacoes:
+        saude_pct = vinculacoes["saude"].percentual
+        educ_pct = vinculacoes["educacao"].percentual
+        base_saude_educ = vinculacoes["saude"].base_calculo
+        aplic_saude = vinculacoes["saude"].aplicado
+        aplic_educacao = vinculacoes["educacao"].aplicado
+    else:
+        saude_pct = aplic_saude / base_saude_educ if base_saude_educ else 0.0
+        educ_pct = aplic_educacao / base_saude_educ if base_saude_educ else 0.0
 
     itens = {
         "Pessoal / RCL": {

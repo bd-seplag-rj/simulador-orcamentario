@@ -98,10 +98,16 @@ def _status(razao: float, teto: float) -> str:
     return "OK"
 
 
-def calcular_dtp(ds, rcl: float, anualizar: bool = True) -> ResultadoDTP:
-    """Apura a DTP a partir de um `sigfis.DespesaSigfis` e da RCL (R$ bi)."""
+def calcular_dtp(ds, rcl: float, anualizar: bool = True,
+                 acrescimo_por_poder: dict | None = None) -> ResultadoDTP:
+    """Apura a DTP a partir de um `sigfis.DespesaSigfis` e da RCL (R$ bi).
+
+    `acrescimo_por_poder`: {Poder: R$ bi} — despesa de pessoal simulada,
+    somada à DTP do Poder correspondente (usado pelo simulador de alocação).
+    """
     esc = C.DB_ESCALA_PARA_BI
     fator = (12.0 / ds.n_meses) if (anualizar and ds.n_meses) else 1.0
+    acrescimo_por_poder = acrescimo_por_poder or {}
     obs = []
 
     d = ds.df
@@ -111,7 +117,8 @@ def calcular_dtp(ds, rcl: float, anualizar: bool = True) -> ResultadoDTP:
     p1["_poder"] = [_poder_da_linha(f, t, u)
                     for f, t, u in zip(p1["Função"], p1["_titulo"], p1["Sigla UO"])]
 
-    dtp_bruta = float(p1["_valor"].sum())
+    acrescimo_total = float(sum(acrescimo_por_poder.values()))
+    dtp_bruta = float(p1["_valor"].sum()) + acrescimo_total
 
     # ---- deduções do art. 19, § 1º -------------------------------------
     deducoes = {}
@@ -151,13 +158,15 @@ def calcular_dtp(ds, rcl: float, anualizar: bool = True) -> ResultadoDTP:
         "Inativos (Função 9)": float(inat.loc[~m_pens, "_valor"].sum()),
         "Pensionistas (Função 9)": float(inat.loc[m_pens, "_valor"].sum()),
     }
+    if acrescimo_total:
+        componentes["Acréscimo simulado"] = acrescimo_total
 
     # ---- por Poder ------------------------------------------------------
     liq = p1.loc[~mascara_deduzida]
     g = liq.groupby("_poder")["_valor"].sum()
     linhas = []
     for poder, teto in C.LRF_SUBLIMITES.items():
-        val = float(g.get(poder, 0.0))
+        val = float(g.get(poder, 0.0)) + float(acrescimo_por_poder.get(poder, 0.0))
         razao_p = val / rcl if rcl else 0.0
         linhas.append({"Poder": poder, "DTP (R$ bi)": val,
                        "% da RCL": razao_p * 100, "Limite %": teto * 100,

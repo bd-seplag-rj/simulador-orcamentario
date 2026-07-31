@@ -25,6 +25,8 @@ from engine import despesa as D
 from engine import dados_arquivo as DA
 from engine import focus as F
 from engine import sigfis as SG
+from engine import alocacao as AL
+from engine import vinculacoes as VC
 
 st.set_page_config(page_title="Simulador Orçamentário — ERJ / PLDO 2027",
                    page_icon="📊", layout="wide")
@@ -117,7 +119,8 @@ st.title("📊 Simulador Orçamentário — Estado do Rio de Janeiro")
 st.caption(f"Base: {C.METADADOS['documento']} · unidade {C.UNIDADE}")
 
 tabs = st.tabs(["Visão geral", "Drivers macro", "Receita", "Execução (SIAFE)",
-                "CAPAG", "Propag", "LRF & Vinculações", "Fontes & Governança"])
+                "🧮 Simular despesa", "CAPAG", "Propag", "LRF & Vinculações",
+                "Fontes & Governança"])
 
 
 def kpi_card(col, titulo, valor, sub, cor=None):
@@ -746,9 +749,139 @@ with tabs[2]:
 
 
 # ===========================================================================
-# ABA 4 (índice 4) — CAPAG
+# ABA 4 — SIMULAR DESPESA (alocação)
 # ===========================================================================
 with tabs[4]:
+    st.subheader(f"🧮 Simulação de nova despesa — {ano_foco}")
+    if base_despesa is None or ds is None or SIG["receita"] is None:
+        st.info("A simulação de despesa exige as planilhas SIGFIS. Selecione "
+                "**Planilha SIGFIS** na aba *Execução (SIAFE)*.", icon="📄")
+    else:
+        rs_sim = SIG["receita"]
+        st.caption("Responde a três perguntas distintas: **há autorização** "
+                   "(saldo de dotação da UO), **há dinheiro** (margem "
+                   "orçamentária do Estado) e **é legal** (LRF, sublimite do "
+                   "Poder e vinculações constitucionais).")
+
+        mapa_poder = AL.mapa_uo_poder(ds)
+        tab_uo = SG.despesa_por_uo(ds)
+        rot_uo = dict(zip(tab_uo["cod_uo"], tab_uo["tit_uo"]))
+
+        with st.form("form_alocacao"):
+            f1 = st.columns([2, 1, 1])
+            uo_sel = f1[0].selectbox(
+                "Unidade Orçamentária (UO)", tab_uo["cod_uo"].tolist(),
+                format_func=lambda c: f"{rot_uo.get(c, '')} ({c})")
+            valor_mi = f1[1].number_input(
+                "Valor (R$ milhões)", min_value=0.0, max_value=100_000.0,
+                value=500.0, step=50.0,
+                help="Valor anual da nova despesa, no ano em foco.")
+            cat_sel = f1[2].selectbox(
+                "Grupo de Despesa (GND)", list(AL.CATEGORIAS),
+                format_func=lambda k: AL.CATEGORIAS[k])
+            f2 = st.columns([2, 1, 1])
+            func_sel = f2[0].selectbox(
+                "Função orçamentária", [0] + sorted(SG.FUNCOES),
+                format_func=lambda f: ("(não informar)" if f == 0
+                                       else f"{f} — {SG.FUNCOES[f]}"),
+                help="Se for saúde (10) ou educação (12), a despesa conta para "
+                     "a vinculação constitucional.")
+            recorr = f2[1].radio("Natureza", ["Continuada", "Por uma vez"],
+                                 help="Continuada = despesa obrigatória de "
+                                      "caráter continuado (arts. 16 e 17 da LRF).")
+            f2[2].markdown("&nbsp;", unsafe_allow_html=True)
+            enviar = st.form_submit_button("▶️ Simular impacto", type="primary")
+
+        if enviar or st.session_state.get("_sim_feita"):
+            st.session_state["_sim_feita"] = True
+            prop = AL.Proposta(
+                cod_uo=uo_sel, sigla_uo=rot_uo.get(uo_sel, uo_sel),
+                valor=valor_mi / 1000.0, categoria=cat_sel,
+                funcao=int(func_sel), recorrente=(recorr == "Continuada"),
+                poder=mapa_poder.get(uo_sel, "Executivo"))
+            sim = AL.simular(cen_ativo, anchors, base_despesa, ds, rs_sim,
+                             [prop], ano=ano_foco)
+
+            cor_v = {"VIÁVEL": "#1a9850", "VIÁVEL COM RESSALVA": "#fc8d59",
+                     "INVIÁVEL": "#d73027"}[sim.verdicto]
+            icon_v = {"VIÁVEL": "✅", "VIÁVEL COM RESSALVA": "⚠️",
+                      "INVIÁVEL": "🚫"}[sim.verdicto]
+            st.markdown(
+                f"<div style='padding:14px;border-radius:8px;background:{cor_v}18;"
+                f"border-left:6px solid {cor_v}'><span style='font-size:26px;"
+                f"font-weight:800;color:{cor_v}'>{icon_v} {sim.verdicto}</span>"
+                f"<br><b>{prop.sigla_uo}</b> · R$ {valor_mi:,.0f} milhões · "
+                f"{AL.CATEGORIAS[cat_sel]} · {recorr.lower()} · Poder: "
+                f"{prop.poder}</div>", unsafe_allow_html=True)
+
+            # ---- as três perguntas ----
+            st.markdown("#### Checagens")
+            for c in sim.checagens:
+                ic = {"OK": "✅", "ATENCAO": "⚠️", "BLOQUEIO": "🚫"}[c.status]
+                cor = {"OK": CORES["OK"], "ATENCAO": CORES["PRUDENCIAL"],
+                       "BLOQUEIO": CORES["ESTOURADO"]}[c.status]
+                st.markdown(
+                    f"{ic} <b style='color:{cor}'>{c.nome}</b> — {c.detalhe}",
+                    unsafe_allow_html=True)
+
+            # ---- impacto nos índices ----
+            st.markdown("#### Impacto nos índices")
+            d = sim.deltas
+            m = st.columns(5)
+            n0, n1 = d["CAPAG nota"]
+            m[0].metric("CAPAG", n1, ("sem mudança" if n0 == n1 else f"era {n0}"),
+                        delta_color="off")
+            p0, p1 = d["CAPAG poupança"]
+            m[1].metric("CAPAG — poupança", f"{p1:.3f}", f"{p1-p0:+.3f}",
+                        delta_color="inverse")
+            g0, g1 = d["Propag índice"]
+            m[2].metric("Propag", f"{g1:.0f}/100", f"{g1-g0:+.1f}")
+            l0, l1 = d["Pessoal/RCL"]
+            m[3].metric("Pessoal / RCL", f"{l1*100:.2f}%",
+                        f"{(l1-l0)*100:+.2f} p.p.", delta_color="inverse")
+            r0, r1 = d["Resultado primário"]
+            m[4].metric("Resultado primário", f"R$ {r1:.2f} bi",
+                        f"{r1-r0:+.2f} bi")
+
+            # ---- vinculações ----
+            v0 = sim.res_antes.vinculacoes.get(ano_foco)
+            v1 = sim.res_depois.vinculacoes.get(ano_foco)
+            if v0 and v1:
+                st.markdown("#### Vinculações constitucionais")
+                vv = st.columns(len(v1))
+                for i, (chave, r1v) in enumerate(v1.items()):
+                    r0v = v0[chave]
+                    vv[i].metric(
+                        r1v.label, f"{r1v.percentual*100:.2f}%",
+                        f"{(r1v.percentual-r0v.percentual)*100:+.2f} p.p. "
+                        f"(mín {r1v.minimo*100:.0f}%)")
+                    vv[i].caption(("✅ cumprida" if r1v.status == "OK"
+                                   else f"🚫 faltam R$ {r1v.faltante:.2f} bi")
+                                  + f" · aplicado R$ {r1v.aplicado:.2f} bi")
+
+            # ---- margens máximas ----
+            st.markdown("#### Até quanto caberia?")
+            mm = pd.DataFrame([{"Restrição": k, "Margem (R$ bi)": v,
+                                "Margem (R$ mi)": v * 1000}
+                               for k, v in sim.margem_maxima.items()])
+            binding = mm.loc[mm["Margem (R$ bi)"].idxmin()] if len(mm) else None
+            st.dataframe(mm.round(2), width='stretch', hide_index=True)
+            if binding is not None:
+                st.info(f"Restrição mais apertada: **{binding['Restrição']}** — "
+                        f"R$ {binding['Margem (R$ mi)']:,.0f} milhões.", icon="📌")
+
+            for o in sim.observacoes:
+                st.caption("• " + o)
+            st.caption("A simulação é apoio à decisão: a abertura de crédito "
+                       "adicional, a compensação exigida pelos arts. 16/17 e o "
+                       "enquadramento na LDO/LOA dependem de análise da SEFAZ e "
+                       "da PGE. [VALIDAR-SEFAZ/JURIDICO]")
+
+
+# ===========================================================================
+# ABA 5 — CAPAG
+# ===========================================================================
+with tabs[5]:
     st.subheader(f"CAPAG simulado — {ano_foco}")
     st.warning(C.CAPAG_REGRA, icon="📏")
     st.info("Exibido em versão **simulada** (projeção sob o cenário). A versão "
@@ -786,7 +919,7 @@ with tabs[4]:
 # ===========================================================================
 # ABA 5 — PROPAG
 # ===========================================================================
-with tabs[5]:
+with tabs[6]:
     st.subheader(f"Índice de adesão sustentável ao Propag — {ano_foco}")
     st.caption(f"LC nº 212/2025 · amortização extraordinária "
                f"{C.PROPAG['amortizacao_extraordinaria']*100:.0f}% do estoque · "
@@ -819,7 +952,7 @@ with tabs[5]:
 # ===========================================================================
 # ABA 6 — LRF & VINCULAÇÕES
 # ===========================================================================
-with tabs[6]:
+with tabs[7]:
     st.subheader(f"Limites da LRF e vinculações — {ano_foco}")
     st.caption(C.LRF["obs_rrf"])
     lrf = res.lrf[ano_foco]
@@ -915,7 +1048,7 @@ with tabs[6]:
 # ===========================================================================
 # ABA 7 — FONTES & GOVERNANÇA
 # ===========================================================================
-with tabs[7]:
+with tabs[8]:
     st.subheader("Registro de fontes e frescor (passo 0)")
     fichas = pd.DataFrame([
         {"Rubrica": m["label"], "Dono/Sistema": m["dono"], "Driver": m["driver"],

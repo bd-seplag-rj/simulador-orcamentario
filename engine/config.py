@@ -484,6 +484,43 @@ DTP_DEDUCOES = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# VINCULAÇÕES CONSTITUCIONAIS — base de cálculo e aplicação  [VALIDAR-SEFAZ]
+#
+# Base (art. 212 CF / LC 141): receita resultante de impostos, incluída a
+# proveniente de transferências, DEDUZIDAS as parcelas entregues aos Municípios.
+# O FECP fica FORA por ser adicional de ICMS vinculado ao Fundo de Combate à
+# Pobreza (não integra a base do ensino).
+# ---------------------------------------------------------------------------
+VINCULACOES = {
+    "educacao": {
+        "label": "Educação — MDE (art. 212 CF)",
+        "funcao": 12,
+        "minimo": 0.25,
+        # Inativos do magistério: contam na apuração histórica do ERJ, mas o
+        # tratamento é contestado (EC 108/2020 e regras do FUNDEB).
+        "incluir_inativos": True,
+        "palavras_inativos": r"educa[çc][ãa]o|magist[ée]rio|ensino",
+        "validacao": "[VALIDAR-SEFAZ] inclusão de inativos do magistério na MDE "
+                     "é controversa e altera o resultado em ~8 p.p.",
+    },
+    "saude": {
+        "label": "Saúde — ASPS (LC 141/2012)",
+        "funcao": 10,
+        "minimo": 0.12,
+        # Inativos da saúde NÃO integram ASPS (LC 141, art. 4º).
+        "incluir_inativos": False,
+        "palavras_inativos": r"sa[úu]de",
+        "validacao": "[VALIDAR-SEFAZ] LC 141 exclui inativos e restos a pagar "
+                     "sem disponibilidade de caixa.",
+    },
+}
+
+# Prefixos de natureza que compõem a base de cálculo das vinculações.
+VINC_BASE_IMPOSTOS = ("1114501", "111251", "111252", "1113")   # ICMS, IPVA, ITD, IRRF
+VINC_BASE_TRANSFERENCIAS = ("17115",)                          # FPE + IPI-Exp
+VINC_BASE_EXCLUI_FECP = True
+
 DTP_STATUS_VALIDACAO = (
     "[VALIDAR-SEFAZ/JURIDICO] A apuração oficial da DTP é do RGF. Este cálculo "
     "reproduz as regras dos arts. 18-19 da LRF sobre a base disponível "
