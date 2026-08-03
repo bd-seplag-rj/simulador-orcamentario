@@ -2,8 +2,13 @@
 app.py — Painel de Simulação Orçamentária (ERJ / PLDO 2027).
 
 Streamlit, SEM barra lateral — todos os controles ficam em abas:
-  Visão geral · Drivers macro · Receita · Execução (SIAFE) · CAPAG · Propag ·
-  LRF & Vinculações · Fontes & Governança
+  Visão geral · Drivers macro · Receita · Execução (SIAFE) · Simular despesa ·
+  CAPAG · Propag · LRF & Vinculações · Fontes & Governança
+
+FONTE ÚNICA DE DADOS: as planilhas do SIGFIS na raiz do projeto (despesa e
+receita). Não há upload de arquivo nem conexão a banco na interface — os
+módulos engine/db.py e engine/dados_arquivo.py seguem no repositório para a
+automação futura da consulta ao banco, mas não alimentam o painel hoje.
 
 Drivers macro são pré-preenchidos SEMPRE com o Boletim Focus mais recente
 (engine/focus.py, API pública do BCB), com fallback nas âncoras do PLDO.
@@ -11,7 +16,8 @@ A receita projetada de óleo e gás tem botão para a ferramenta dedicada.
 """
 from __future__ import annotations
 import copy
-import io
+import os
+import sys
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -20,9 +26,7 @@ from engine import config as C
 from engine import receita as R
 from engine import cenarios as S
 from engine import indicadores as I
-from engine import db as DB
 from engine import despesa as D
-from engine import dados_arquivo as DA
 from engine import focus as F
 from engine import sigfis as SG
 from engine import alocacao as AL
@@ -56,42 +60,57 @@ def _focus():
     return F.ultimo_focus(C.ANOS)
 
 
-@st.cache_data(ttl=600, show_spinner="Consultando o banco…")
-def _carregar_base_despesa(ano: int, metrica: str):
-    df_gd = DB.despesa_por_gd(ano, metrica)
-    return D.montar_base_despesa(df_gd, ano_base=ano, metrica=metrica)
-
-
-@st.cache_data(show_spinner="Lendo arquivo exportado…")
-def _parse_arquivo(nome: str, conteudo: bytes) -> pd.DataFrame:
-    return DA.ler_export(io.BytesIO(conteudo), nome=nome)
-
-
 @st.cache_resource(show_spinner="Lendo planilhas SIGFIS…")
 def _sigfis():
-    """Carrega os .xls reais de despesa e receita (se presentes na raiz)."""
-    out = {"despesa": None, "receita": None, "erro": None}
-    try:
-        out["despesa"] = SG.carregar_despesa()
-    except Exception as e:  # noqa: BLE001
-        out["erro"] = f"despesa: {e}"
-    try:
-        out["receita"] = SG.carregar_receita()
-    except Exception as e:  # noqa: BLE001
-        out["erro"] = f"{out['erro'] or ''} receita: {e}".strip()
-    return out
+    """Carrega as planilhas de despesa e receita.
+
+    Deixa a exceção subir de propósito: o Streamlit não cacheia chamadas que
+    falham, então corrigir o ambiente (instalar o leitor, repor o arquivo) já
+    resolve no próximo rerun. Capturar o erro aqui e devolver `None` faria a
+    falha ficar cacheada no processo — e aí nem instalar o pacote adiantaria
+    sem reiniciar o servidor.
+    """
+    return {"despesa": SG.carregar_despesa(), "receita": SG.carregar_receita()}
 
 
-SIG = _sigfis()
+try:
+    SIG = _sigfis()
+except Exception as _erro_sigfis:  # noqa: BLE001
+    _diag = SG.diagnostico()
+    st.title("📊 Simulador Orçamentário — Estado do Rio de Janeiro")
+    _falta_leitor = [m for m, s in _diag["leitores"].items() if "AUSENTE" in s]
+    if _falta_leitor:
+        st.error(f"**Falta o leitor de planilha**: `{', '.join(_falta_leitor)}`. "
+                 "As planilhas estão na pasta, mas o Python não consegue abri-las.",
+                 icon="📦")
+        st.code(f"pip install {' '.join(_falta_leitor)}", language="bash")
+    elif not _diag["despesa"] or not _diag["receita"]:
+        st.error("**Planilha de origem não localizada.** O painel procura, na "
+                 "pasta do projeto, um arquivo com **DESPESA** no nome e outro "
+                 "com **Receita** (`.xls` ou `.xlsx`).", icon="🚫")
+    else:
+        st.error(f"**Falha ao ler as planilhas.** {type(_erro_sigfis).__name__}: "
+                 f"{_erro_sigfis}", icon="🚫")
+
+    with st.expander("Diagnóstico", expanded=True):
+        st.write("**Pasta:**", _diag["raiz"])
+        st.write("**Planilhas encontradas:**",
+                 _diag["planilhas_na_pasta"] or "nenhuma")
+        st.write("**Reconhecida como despesa:**",
+                 os.path.basename(_diag["despesa"]) if _diag["despesa"] else "—")
+        st.write("**Reconhecida como receita:**",
+                 os.path.basename(_diag["receita"]) if _diag["receita"] else "—")
+        st.write("**Leitores:**", _diag["leitores"])
+        st.write("**Python em uso:**", sys.executable)
+        st.caption(f"Erro original: {type(_erro_sigfis).__name__}: {_erro_sigfis}")
+
+    if st.button("🔄 Tentar novamente"):
+        st.cache_resource.clear()
+        st.rerun()
+    st.stop()
 MESES_PT = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
             "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
 
-
-def _status_banco():
-    try:
-        return True, DB.testar_conexao()
-    except Exception as e:  # noqa: BLE001
-        return False, str(e)
 
 
 anchors = _anchors()
@@ -207,181 +226,36 @@ with tabs[1]:
 # ===========================================================================
 with tabs[3]:
     st.subheader("Execução da despesa (SIAFE)")
-    _tem_sigfis = SIG["despesa"] is not None
-    _opcoes = (["Planilha SIGFIS (.xls local)"] if _tem_sigfis else []) + [
-        "Protótipo (sem dados)", "Arquivo exportado (CSV/Excel)", "Conexão direta (banco)"]
-    fonte_dados = st.radio(
-        "Origem da despesa", _opcoes, horizontal=True,
-        help="SIGFIS: planilha real já presente no projeto. Arquivo: export do "
-             "phpMyAdmin. Conexão direta requer MySQL acessível (Remote MySQL/SSH).")
 
-    base_despesa = None
-    df_funcao = None
-    df_uo = None
-    db_erro = None
-    ds = None   # DespesaSigfis quando a fonte é a planilha real
+    ds = SIG["despesa"]          # única fonte de despesa do painel
+    df_funcao = SG.despesa_por_funcao(ds).rename(columns={"funcao": "tit_funcao"})
+    df_uo = SG.despesa_por_uo(ds).head(12)
+    st.success(f"📄 {ds.arquivo} · {len(ds.df):,} linhas · {ds.ano} · "
+               f"acumulado até **{MESES_PT[ds.n_meses-1]}** ({ds.n_meses}/12 meses) · "
+               f"estágio **Pago**", icon="✅")
 
-    def _seletor_metrica():
-        return st.radio("Métrica de execução (estágio usado como “realizado”)",
-                        ["Empenhado", "Liquidado", "Pago"], horizontal=True,
-                        help="Empenhado = compromisso · Liquidado = bem/serviço reconhecido "
-                             "· Pago = desembolso de caixa.")
-
-    if fonte_dados == "Planilha SIGFIS (.xls local)":
-        ds = SIG["despesa"]
-        st.success(f"📄 {ds.arquivo} · {len(ds.df):,} linhas · {ds.ano} · "
-                   f"acumulado até **{MESES_PT[ds.n_meses-1]}** ({ds.n_meses}/12 meses) · "
-                   f"estágio **Pago**", icon="✅")
-        anualizar = st.checkbox(
-            f"Anualizar a execução por run-rate (× 12/{ds.n_meses}) para alimentar os índices",
-            value=True,
-            help="Os dados cobrem apenas parte do ano. Sem anualizar, comparar "
-                 f"{ds.n_meses} meses de despesa com a receita ANUAL projetada "
-                 "subestima Pessoal/RCL, poupança do CAPAG e serviço da dívida.")
-        gd = SG.despesa_por_gd(ds, anualizar=anualizar)
-        base_despesa = D.montar_base_despesa(gd, ano_base=ds.ano, metrica="Pago")
-        df_funcao = SG.despesa_por_funcao(ds).rename(columns={"funcao": "tit_funcao"})
-        df_uo = SG.despesa_por_uo(ds).head(12)
-        if anualizar:
-            st.caption(f"⚙️ Índices calculados com despesa **anualizada** "
-                       f"(× {12/ds.n_meses:.2f}). Os quadros de análise abaixo mostram "
-                       "os valores **acumulados reais**, sem projeção.")
-        else:
-            st.warning("Índices usando execução parcial contra receita anual — "
-                       "Pessoal/RCL e poupança ficarão artificialmente baixos.", icon="⚠️")
-        st.caption("Este export traz apenas o estágio **Pago** (sem empenhado/liquidado), "
-                   "portanto não é possível apurar restos a pagar. [VALIDAR-SEFAZ]")
-
-    elif fonte_dados == "Arquivo exportado (CSV/Excel)":
-        up = st.file_uploader("Arquivo da tabela `despesa`", type=["csv", "xlsx", "xls"],
-                              help="phpMyAdmin → tabela `despesa` → Export → CSV → "
-                                   "“Colunas na primeira linha”.")
-        if up is not None:
-            try:
-                df_arq = _parse_arquivo(up.name, up.getvalue())
-                faltando = DA.validar_colunas(df_arq)
-                if faltando:
-                    st.error("Colunas essenciais ausentes: " + ", ".join(faltando), icon="🚫")
-                    with st.expander("Colunas encontradas"):
-                        st.code(", ".join(map(str, df_arq.columns)))
-                else:
-                    anos_arq = DA.anos_disponiveis(df_arq)
-                    cc = st.columns([1, 2])
-                    ano_sel = cc[0].selectbox("Ano-base", anos_arq) if anos_arq else None
-                    with cc[1]:
-                        metrica = _seletor_metrica()
-                    if ano_sel is not None:
-                        gd = DA.agregar_gd(df_arq, int(ano_sel), metrica)
-                        base_despesa = D.montar_base_despesa(gd, ano_base=int(ano_sel), metrica=metrica)
-                        df_funcao = DA.agregar_funcao(df_arq, int(ano_sel), metrica)
-                        df_uo = DA.agregar_uo(df_arq, int(ano_sel), metrica, limite=12)
-                        st.success(f"Arquivo lido · {len(df_arq):,} linhas · base {ano_sel} "
-                                   f"· {metrica}", icon="✅")
-            except Exception as e:  # noqa: BLE001
-                db_erro = str(e)
-                st.error("Falha ao ler/agregar o arquivo. Usando protótipo.", icon="⚠️")
-                with st.expander("Detalhe do erro"):
-                    st.code(str(e))
-        else:
-            st.info("Aguardando o arquivo exportado do phpMyAdmin.", icon="⬆️")
-
-    elif fonte_dados == "Conexão direta (banco)":
-        ok, info = _status_banco()
-        if not ok:
-            db_erro = info
-            st.error("Sem conexão com o banco. Usando protótipo.", icon="🚫")
-            with st.expander("Detalhe do erro / como configurar"):
-                st.code(info)
-                st.caption("Requer MySQL acessível (Remote MySQL ou túnel SSH). "
-                           "Ver INTEGRACAO_BANCO.md.")
-        else:
-            try:
-                anos_db = DB.anos_disponiveis()
-            except Exception as e:  # noqa: BLE001
-                anos_db, db_erro = [], str(e)
-            if anos_db:
-                cc = st.columns([1, 2])
-                ano_db = cc[0].selectbox("Ano-base", anos_db)
-                with cc[1]:
-                    metrica = _seletor_metrica()
-                try:
-                    base_despesa = _carregar_base_despesa(int(ano_db), metrica)
-                    df_funcao = DB.despesa_por_funcao(int(ano_db), metrica).head(12)
-                    df_uo = DB.despesa_por_uo(int(ano_db), metrica, limite=12)
-                    st.success(f"Conectado · {info['linhas']:,} linhas · base {ano_db} "
-                               f"· {metrica}", icon="✅")
-                except Exception as e:  # noqa: BLE001
-                    db_erro = str(e)
-                    st.error("Falha ao agregar despesa. Usando protótipo.", icon="⚠️")
-                    with st.expander("Detalhe do erro"):
-                        st.code(str(e))
-
-    st.divider()
-    # ---- display da execução ----
-    if base_despesa is None:
-        st.info("Escolha **“Arquivo exportado (CSV/Excel)”** acima e carregue a "
-                "exportação da tabela `despesa` do phpMyAdmin — os índices passam a "
-                "usar a execução real. Sem dados, a despesa usa o modelo-protótipo.",
-                icon="🗄️")
-        st.markdown("**Como exportar no phpMyAdmin (sem acesso direto ao MySQL):**")
-        st.markdown(
-            "1. Abra o banco `painel_subor` → clique na tabela **`despesa`**.\n"
-            "2. Aba **Export** → formato **CSV** → marque **“Colunas na primeira linha”**.\n"
-            "3. Se for grande, exporte um ano: aba **SQL** → "
-            "`SELECT * FROM despesa WHERE ano = 2026;` → Export.\n"
-            "4. Baixe o `.csv` e carregue no campo acima.\n\n"
-            "Detalhes e conexão direta em **INTEGRACAO_BANCO.md**.")
-    elif ds is None:
-        # Bloco genérico (CSV / banco). Com SIGFIS, a "Análise geral" abaixo
-        # cobre isso com os valores acumulados reais, sem anualização.
-        bd = base_despesa
-        st.success(f"Fonte: {bd.fonte} · ano-base {bd.ano_base} · métrica {bd.metrica}",
-                   icon="🟢")
-        e = st.columns(4)
-        e[0].metric("Execução total", f"R$ {bd.execucao_total:.1f} bi")
-        e[1].metric("Dotação atual", f"R$ {bd.dotacao_total:.1f} bi")
-        e[2].metric("Execução", f"{bd.execucao_pct*100:.1f}%")
-        e[3].metric("Serviço da dívida", f"R$ {bd.servico_divida:.1f} bi",
-                    help="Juros (GND 2) + Amortização (GND 6)")
-
-        st.markdown("#### Despesa por Grupo de Despesa (GND) — atualiza os índices")
-        cats = ["pessoal", "juros", "custeio", "investimento", "inversoes", "amortizacao"]
-        rotulos = {"pessoal": "1 Pessoal", "juros": "2 Juros", "custeio": "3 Custeio",
-                   "investimento": "4 Investimento", "inversoes": "5 Inversões",
-                   "amortizacao": "6 Amortização"}
-        vals = [bd.por_categoria.get(c, 0.0) for c in cats]
-        fig = go.Figure(go.Bar(x=[rotulos[c] for c in cats], y=vals, marker_color="#4575b4"))
-        fig.update_layout(height=300, margin=dict(t=10, b=10), yaxis_title="R$ bi")
-        st.plotly_chart(fig, width='stretch')
-        st.caption("Correntes = pessoal + juros + custeio · Capital = investimento + "
-                   "inversões + amortização. Alimenta Pessoal/RCL, poupança do CAPAG, "
-                   "serviço da dívida e o saldo primário do Propag.")
-
-        colf, colu = st.columns(2)
-        with colf:
-            st.markdown("**Top funções**")
-            if df_funcao is not None and not df_funcao.empty:
-                st.dataframe(df_funcao[["tit_funcao", "execucao", "dot_atual"]]
-                             .rename(columns={"tit_funcao": "Função", "execucao": "Exec. (R$ bi)",
-                                              "dot_atual": "Dotação"}).round(2),
-                             width='stretch', hide_index=True)
-            else:
-                st.caption("Sem agregação por função para esta fonte/ano.")
-        with colu:
-            st.markdown("**Top unidades orçamentárias**")
-            if df_uo is not None and not df_uo.empty:
-                st.dataframe(df_uo[["tit_uo", "execucao", "dot_atual"]]
-                             .rename(columns={"tit_uo": "UO", "execucao": "Exec. (R$ bi)",
-                                              "dot_atual": "Dotação"}).round(2),
-                             width='stretch', hide_index=True)
-            else:
-                st.caption("Sem agregação por UO para esta fonte/ano.")
-        st.caption(C.DB_STATUS_VALIDACAO)
+    anualizar = st.checkbox(
+        f"Anualizar a execução por run-rate (× 12/{ds.n_meses}) para alimentar os índices",
+        value=True,
+        help="Os dados cobrem apenas parte do ano. Sem anualizar, comparar "
+             f"{ds.n_meses} meses de despesa com a receita ANUAL projetada "
+             "subestima Pessoal/RCL, poupança do CAPAG e serviço da dívida.")
+    gd = SG.despesa_por_gd(ds, anualizar=anualizar)
+    base_despesa = D.montar_base_despesa(gd, ano_base=ds.ano, metrica="Pago")
+    if anualizar:
+        st.caption(f"⚙️ Índices calculados com despesa **anualizada** "
+                   f"(× {12/ds.n_meses:.2f}). Os quadros de análise abaixo mostram "
+                   "os valores **acumulados reais**, sem projeção.")
+    else:
+        st.warning("Índices usando execução parcial contra receita anual — "
+                   "Pessoal/RCL e poupança ficarão artificialmente baixos.", icon="⚠️")
+    st.caption("Esta planilha traz apenas o estágio **Pago** (sem empenhado/liquidado), "
+               "portanto não é possível apurar restos a pagar. [VALIDAR-SEFAZ]")
 
     # -------------------------------------------------------------------
-    # Análise geral + trajetória por UO (requer a planilha SIGFIS)
+    # Análise geral + trajetória por UO
     # -------------------------------------------------------------------
-    if ds is not None:
+    with st.container():
         st.divider()
         st.markdown("### 📈 Análise geral dos gastos")
 
@@ -533,11 +407,10 @@ res_presets = {k: S.avaliar_cenario(v, anchors, base_despesa, ds)
 # ABA 0 — VISÃO GERAL
 # ===========================================================================
 with tabs[0]:
-    _fonte_badge = ("🟢 despesa: execução real" if res.fonte_despesa.startswith("real")
-                    else "🟡 despesa: modelo-protótipo (sem banco)")
     _focus_badge = (f"🎯 drivers: Focus {focus_info['data_ref']}" if focus_info["ok"]
                     else "📌 drivers: âncoras PLDO (Focus indisponível)")
-    st.caption(f"{_focus_badge} · {_fonte_badge}")
+    st.caption(f"{_focus_badge} · 🟢 despesa e receita: planilhas SIGFIS "
+               f"({ds.ano}, até {MESES_PT[ds.n_meses-1]})")
 
     c1, c2 = st.columns(2)
     c1.info(f"ℹ️ {C.METADADOS['capag_no_pldo']} O CAPAG é **simulado** e deve ser "
@@ -646,11 +519,7 @@ with tabs[2]:
     # Subseção: execução da receita por Unidade Gestora (dados reais SIGFIS)
     # =====================================================================
     rs = SIG["receita"]
-    if rs is None:
-        st.divider()
-        st.info("Planilha de receita do SIGFIS não encontrada na raiz do projeto — "
-                "a subseção por UG fica indisponível.", icon="📄")
-    else:
+    with st.container():
         st.divider()
         st.markdown("### 🏦 Previsão × Realização da receita por Unidade Gestora")
         ug_tab = SG.receita_por_ug(rs)
@@ -753,10 +622,7 @@ with tabs[2]:
 # ===========================================================================
 with tabs[4]:
     st.subheader(f"🧮 Simulação de nova despesa — {ano_foco}")
-    if base_despesa is None or ds is None or SIG["receita"] is None:
-        st.info("A simulação de despesa exige as planilhas SIGFIS. Selecione "
-                "**Planilha SIGFIS** na aba *Execução (SIAFE)*.", icon="📄")
-    else:
+    with st.container():
         rs_sim = SIG["receita"]
         st.caption("Responde a três perguntas distintas: **há autorização** "
                    "(saldo de dotação da UO), **há dinheiro** (margem "
@@ -971,12 +837,7 @@ with tabs[7]:
     # ------------------------------------------------------------------
     st.divider()
     st.markdown("### ⚖️ Despesa Total com Pessoal (DTP) — LRF arts. 18 a 20")
-    if res.dtp is None:
-        st.info("A apuração da DTP requer a planilha SIGFIS. Selecione "
-                "**Planilha SIGFIS** na aba *Execução (SIAFE)*.", icon="📄")
-        _p_pldo = C.ANCORAS_PLDO_2027["pessoal_sobre_rcl"] * 100
-        st.caption(f"Referência do PLDO 2027: {_p_pldo:.2f}% da RCL.")
-    else:
+    with st.container():
         t = res.dtp
         _p_pldo = C.ANCORAS_PLDO_2027["pessoal_sobre_rcl"] * 100
         d1 = st.columns(4)

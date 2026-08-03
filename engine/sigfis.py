@@ -91,6 +91,35 @@ def caminho_receita() -> str | None:
     return _achar("Receita")
 
 
+def planilhas_encontradas() -> list[str]:
+    """Todos os .xls/.xlsx na raiz do projeto (para diagnóstico)."""
+    achados = (glob.glob(os.path.join(_RAIZ, "*.xls"))
+               + glob.glob(os.path.join(_RAIZ, "*.xlsx")))
+    return [os.path.basename(p) for p in achados]
+
+
+def diagnostico() -> dict:
+    """Por que a leitura falhou? Separa 'arquivo ausente' de 'não sei ler'.
+
+    Confundir os dois custa tempo: um pede o arquivo na pasta, o outro pede
+    `pip install` — e a mensagem errada manda procurar no lugar errado.
+    """
+    leitores = {}
+    for mod, formatos in (("xlrd", ".xls"), ("openpyxl", ".xlsx")):
+        try:
+            __import__(mod)
+            leitores[mod] = f"instalado (lê {formatos})"
+        except ImportError:
+            leitores[mod] = f"AUSENTE — necessário para {formatos}"
+    return {
+        "raiz": _RAIZ,
+        "planilhas_na_pasta": planilhas_encontradas(),
+        "despesa": caminho_despesa(),
+        "receita": caminho_receita(),
+        "leitores": leitores,
+    }
+
+
 def _cols_mes(df: pd.DataFrame) -> list[str]:
     """Colunas mensais na ordem do mês (ignora '0 - Saldo inicial')."""
     achadas = [(int(m.group(1)), c) for c in df.columns

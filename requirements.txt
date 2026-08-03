@@ -2,5 +2,11 @@ streamlit>=1.59
 pandas>=2.2
 numpy>=1.26
 plotly>=6.0
+
+# Leitura das planilhas SIGFIS (fonte única de dados do painel)
+xlrd>=2.0        # arquivos .xls (formato OLE2/BIFF, que é o do SIGFIS)
+openpyxl>=3.1    # arquivos .xlsx
+
+# Consulta ao banco — para a automação futura; não usado pelo painel hoje
 SQLAlchemy>=2.0
 PyMySQL>=1.1
